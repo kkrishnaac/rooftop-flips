@@ -433,7 +433,7 @@ async function upToDate() {
 
 async function main() {
   if (!(await upToDate())) return;
-  $('version').textContent = `Version ${VERSION}`;
+  if ($('version')) $('version').textContent = `Version ${VERSION}`;   // a kept copy of an older page has no such line
   const data = await (await fetch(`./flip_data.json?v=${VERSION}`)).json();
   const gltf = await new GLTFLoader().loadAsync(`./character.glb?v=${VERSION}`, (e) => {
     if (e.total) $('coverBar').style.width = `${Math.min(100, Math.round((e.loaded / e.total) * 100))}%`;
