@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en" style="color-scheme: dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#1b1d24" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <title>Rooftop Flips</title>
+    <meta name="description" content="Free-play backflips on a rooftop at dusk. Hold to jump, hold to tuck, hold to stall." />
+    <meta property="og:title" content="Rooftop Flips" />
+    <meta property="og:description" content="Free-play backflips on a rooftop at dusk. Hold to jump, hold to tuck, hold to stall." />
+    <meta property="og:type" content="website" />
+    <meta name="robots" content="noindex" />
+    <meta property="og:image" content="https://kkrishnaac.github.io/rooftop-flips/cover.jpg" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' data: blob:; object-src 'none'; base-uri 'self'; form-action 'none'" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <style>
+      /* One small system: ink on white, one soft surface, hairlines, pills everywhere. */
+      :root {
+        --ink: #111111;
+        --canvas: #ffffff;
+        --soft: #f5f5f5;
+        --mute: #707072;
+        --hairline: #cacacb;
+        --alert: #d30005;
+        --pill: 999px;
+        --sheet: 20px;
+        --type: "Helvetica Neue", "Arial Nova", Arial, ui-sans-serif, system-ui, sans-serif;
+      }
+      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1d24; color: var(--canvas); font-family: var(--type); }
+      body { touch-action: none; -webkit-user-select: none; user-select: none; }
+      @media (pointer: fine) { html { overscroll-behavior: none; } }
+      .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+      canvas#view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+      .hud { position: fixed; inset: 0; pointer-events: none; padding: max(14px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+      .hud > * { pointer-events: auto; }
+      button { font: inherit; color: inherit; border: 0; cursor: pointer; touch-action: none; }
+      button:focus-visible, input:focus-visible { outline: 3px solid var(--canvas); outline-offset: 3px; }
+
+      .pill { height: 44px; padding: 0 18px; border-radius: var(--pill); background: rgb(17 17 17 / 0.72); color: var(--canvas); font-size: 14px; font-weight: 500; letter-spacing: 0.01em; display: inline-flex; align-items: center; gap: 8px; }
+      .pill[aria-pressed="true"] { background: var(--canvas); color: var(--ink); }
+      .pill { touch-action: manipulation; transition: background-color 120ms ease-out, transform 90ms ease-out; }
+      @media (hover: hover) { .pill:hover { background: rgb(17 17 17 / 0.92); } .pill[aria-pressed="true"]:hover { background: var(--soft); } .hold:hover { box-shadow: inset 0 0 0 2.5px var(--canvas); } .hold.primary:hover { background: var(--soft); box-shadow: none; } }
+      .pill:active { transform: scale(0.97); }
+      .top { position: absolute; top: max(14px, env(safe-area-inset-top)); left: max(16px, env(safe-area-inset-left)); right: max(16px, env(safe-area-inset-right)); display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+      .top .group { display: flex; gap: 8px; }
+
+      .pad { position: absolute; right: max(18px, env(safe-area-inset-right)); bottom: max(18px, env(safe-area-inset-bottom)); display: grid; grid-template-columns: auto auto; grid-template-areas: "stall tuck" ". jump"; gap: 12px; align-items: end; justify-items: end; }
+      .hold { width: 84px; height: 84px; border-radius: var(--pill); font-size: 14px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; background: rgb(17 17 17 / 0.72); color: var(--canvas); box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 0.55); transition: transform 90ms ease-out, background-color 90ms ease-out; }
+      .hold.primary { width: 104px; height: 104px; background: var(--canvas); color: var(--ink); box-shadow: none; font-size: 15px; }
+      .hold.down { transform: scale(0.93); background: var(--canvas); color: var(--ink); }
+      .hold.primary.down { background: var(--soft); }
+      #jump { grid-area: jump; } #tuck { grid-area: tuck; } #stall { grid-area: stall; }
+
+      .note { position: absolute; left: 50%; top: 22%; transform: translateX(-50%); padding: 10px 18px; border-radius: var(--pill); background: var(--canvas); color: var(--ink); font-size: 15px; font-weight: 500; opacity: 0; transition: opacity 160ms ease-out; pointer-events: none; white-space: nowrap; }
+      .note.show { opacity: 1; }
+      .note.bad { background: var(--alert); color: var(--canvas); }
+
+      .hint { position: absolute; left: max(18px, env(safe-area-inset-left)); bottom: max(18px, env(safe-area-inset-bottom)); max-width: 30ch; font-size: 14px; line-height: 1.4; color: var(--canvas); background: rgb(17 17 17 / 0.72); padding: 12px 16px; border-radius: var(--sheet); }
+      .hint[hidden] { display: none; }
+
+      .sheet { overscroll-behavior: contain; position: absolute; top: 68px; left: max(16px, env(safe-area-inset-left)); width: min(320px, calc(100vw - 32px)); background: var(--canvas); color: var(--ink); border-radius: var(--sheet); padding: 18px 18px 20px; display: grid; gap: 16px; }
+      .sheet[hidden] { display: none; }
+      .sheet h2 { margin: 0; font-size: 16px; font-weight: 500; }
+      .field { display: grid; gap: 8px; }
+      .field label { display: flex; justify-content: space-between; font-size: 14px; font-weight: 500; }
+      .field output { color: var(--mute); font-variant-numeric: tabular-nums; }
+      input[type="range"] { width: 100%; height: 28px; accent-color: var(--ink); touch-action: pan-x; }
+      .sheet p { margin: 0; font-size: 13px; line-height: 1.45; color: var(--mute); }
+
+      .cover { position: fixed; inset: 0; display: grid; place-content: center; gap: 14px; justify-items: center; background: #1b1d24; color: var(--canvas); font-size: 15px; z-index: 5; transition: opacity 300ms ease-out; }
+      .cover.gone { opacity: 0; pointer-events: none; }
+      .bar { width: 180px; height: 3px; background: rgb(255 255 255 / 0.2); border-radius: var(--pill); overflow: hidden; }
+      .bar i { display: block; height: 100%; width: 0%; background: var(--canvas); transition: width 200ms ease-out; }
+      .turn { position: fixed; inset: 0; display: none; place-content: center; text-align: center; padding: 32px; background: #1b1d24; color: var(--canvas); font-size: 17px; line-height: 1.4; z-index: 6; }
+      @media (orientation: portrait) and (max-width: 700px) { .turn { display: grid; } }
+      @media (max-height: 420px) { .hold { width: 72px; height: 72px; font-size: 13px; } .hold.primary { width: 90px; height: 90px; } .hint { display: none; } }
+      @media (prefers-reduced-motion: reduce) { .hold, .pill, .note, .cover, .bar i { transition: none; } }
+    </style>
+  </head>
+  <body>
+    <canvas id="view" aria-label="A rooftop at dusk with the character standing on it"></canvas>
+
+    <h1 class="sr">Rooftop Flips</h1>
+    <div class="hud" id="hud">
+      <div class="top">
+        <div class="group">
+          <button class="pill" id="menu" aria-expanded="false" aria-controls="settings">Settings</button>
+          <button class="pill" id="spot" aria-label="Move to the next starting spot">Spot: Roof</button>
+        </div>
+        <div class="group">
+          <button class="pill" id="lock" aria-pressed="false">Lock Camera</button>
+        </div>
+      </div>
+
+      <section class="sheet" id="settings" hidden aria-label="Settings">
+        <h2>Settings</h2>
+        <div class="field">
+          <label for="jumpPower">Jump power <output id="jumpPowerOut">100%</output></label>
+          <input id="jumpPower" name="jumpPower" type="range" min="70" max="140" step="1" value="100" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="spinPower">Rotation power <output id="spinPowerOut">100%</output></label>
+          <input id="spinPower" name="spinPower" type="range" min="60" max="150" step="1" value="100" autocomplete="off" />
+        </div>
+        <p>Drag on the picture to look around, or use the arrow keys. Pinch or scroll to zoom.</p>
+        <p>This game keeps nothing about you: no account, no cookies, no tracking.</p>
+      </section>
+
+      <p class="hint" id="hint">Hold Jump to crouch, then let go to leave the roof. In the air, hold Tuck to spin and let go to open for the landing. Hold Stall to float flat first. On a keyboard: Space, T and S.</p>
+      <div class="note" id="note" role="status" aria-live="polite"></div>
+
+      <div class="pad" aria-label="Flip controls">
+        <button class="hold" id="stall">Stall</button>
+        <button class="hold" id="tuck">Tuck</button>
+        <button class="hold primary" id="jump">Jump</button>
+      </div>
+    </div>
+
+    <div class="cover" id="cover"><span id="coverText">Loading the rooftop…</span><div class="bar"><i id="coverBar"></i></div></div>
+    <div class="turn">Turn your phone sideways to play.</div>
+    <script type="module" src="./client.js"></script>
+  </body>
+</html>
