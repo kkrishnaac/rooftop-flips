@@ -11,6 +11,10 @@ import * as THREE from './vendor/three.module.js';
 import { GLTFLoader } from './vendor/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from './vendor/addons/controls/OrbitControls.js';
 
+// Which release of the game this is. The same number is in version.json and in the address of this
+// file in index.html: tools/publish_pages.py refuses to publish unless all three agree.
+const VERSION = 3;
+
 const $ = (id) => document.getElementById(id);
 const DEG = Math.PI / 180;
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
@@ -413,10 +417,26 @@ function say(text, bad = false) {
   noteTimer = setTimeout(() => note.classList.remove('show'), 1400);
 }
 
+// A phone keeps old copies of the game's files. Ask the server itself (never a kept copy) which
+// release is current; if it is newer than this one, open the page again under the new release's
+// address, which no kept copy can answer for.
+async function upToDate() {
+  try {
+    const latest = (await (await fetch('./version.json', { cache: 'no-store' })).json()).version;
+    if (latest > VERSION && new URLSearchParams(location.search).get('v') !== String(latest)) {
+      location.replace(`./?v=${latest}`);
+      return false;
+    }
+  } catch { /* offline, or no such file: play the copy we have */ }
+  return true;
+}
+
 async function main() {
-  const data = await (await fetch('./flip_data.json')).json();
-  const gltf = await new GLTFLoader().loadAsync('./character.glb', (e) => {
-    if (e.total) $('coverBar').style.width = `${Math.round((e.loaded / e.total) * 100)}%`;
+  if (!(await upToDate())) return;
+  $('version').textContent = `Version ${VERSION}`;
+  const data = await (await fetch(`./flip_data.json?v=${VERSION}`)).json();
+  const gltf = await new GLTFLoader().loadAsync(`./character.glb?v=${VERSION}`, (e) => {
+    if (e.total) $('coverBar').style.width = `${Math.min(100, Math.round((e.loaded / e.total) * 100))}%`;
   });
 
   const root = new THREE.Group();
