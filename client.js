@@ -13,7 +13,7 @@ import { OrbitControls } from './vendor/addons/controls/OrbitControls.js';
 
 // Which release of the game this is. The same number is in version.json and in the address of this
 // file in index.html: tools/publish_pages.py refuses to publish unless all three agree.
-const VERSION = 7;
+const VERSION = 8;
 
 const $ = (id) => document.getElementById(id);
 const DEG = Math.PI / 180;
@@ -584,14 +584,16 @@ async function main() {
   // eases gravity, which buys the time the float uses up.
   const spinPush = pushFor('backflip');
   const FLOAT = 0.6;
+  const STALL_LEAN = 75;                                        // degrees a second the stall leans him back: slow (Krishna: "it should slowly lean backwards")
 
   // ------------------------------------------------------------ state
   const G = data.gravity;
   let now = 0, mode = 'ground', spot = 0;
   let charging = false, chargeAt = 0, takeoffAt = Infinity, charge = 0;
   let turn = 0, landing = 'land_reach', planned = false, tucked = false, stalled = false, touchdownAt = -10;
-  let finishing = false, whip = 1, strain = 0;                  // a stall's late tuck, timed by him, how hard he whips it, and the most he had to
-  let wantStall = false, stallAt = 0, finishAt = Infinity;      // a tap of Stall on the floor still counts; a stall floats a moment at least
+  let hang = false;                                             // he is in the stall's pose right now
+  let stallRate = 0;                                            // how fast the stall is leaning him back, degrees a second
+  let wantStall = false, stallAt = 0, stallUntil = 0;           // a tap of Stall on the floor still counts; even a tap holds the pose a moment
   let airBlend = 0;
   let plainLean = 9;                                            // how far a jump with no flip in it leans back, in degrees
   let lastFall = null;                                          // which fall he took last, for looking at
@@ -733,20 +735,22 @@ async function main() {
     if (which === 'stall') startStall();
   }
   function startTuck() {
-    if (tucked) { finishing = false; return; }                   // a stall's own finish, taken over by the thumb
-    tucked = true; finishing = false; landing = 'land_reach'; planned = false;
-    line.plan(now, [[0.22, 'tuck'], [0.08, 'tuck_spot']]);
+    if (tucked) return;
+    tucked = true; hang = false; landing = 'land_reach'; planned = false;
+    line.plan(now, stalled ? [[0.16, 'tuck'], [0.07, 'tuck_spot']] : [[0.22, 'tuck'], [0.08, 'tuck_spot']]);   // out of a stall the knees whip in
   }
+  // The stall is a pose, not a flip (Krishna, 10 November: "for however long I press it, it should
+  // just stall ... I still have to tap tuck in order to complete the whole flip"). While Stall is
+  // held he hangs in a long line and leans slowly backward; let go, and he only leaves the pose.
   function startStall() {
-    if (stalled || tucked) return;
-    stalled = true; planned = false; stallAt = now; finishAt = Infinity; landing = 'land_reach';
+    if (tucked || hang) return;
+    if (!stalled) stallAt = now;
+    stalled = true; hang = true; planned = false; stallUntil = 0;
     line.plan(now, [[0.11, 'layout'], [0.13, 'hang']]);
   }
-  // The stall is a whole flip: when Stall is let go (or there is only just time left), he whips
-  // the late tuck himself and comes round into the squat.
-  function finishStall() {
-    tucked = true; finishing = true; whip = 1; strain = 0; stallAt = now; finishAt = Infinity; landing = 'squat_reach'; planned = false;
-    line.plan(now, [[0.16, 'tuck'], [0.07, 'tuck_spot']]);
+  function endStall() {
+    hang = false;
+    if (!planned) line.plan(now, [[0.28, 'layout']]);            // (unhurried: the arms are not whipped back overhead)
   }
   function release(which) {
     if (!held[which]) return;
@@ -759,8 +763,8 @@ async function main() {
       takeoffAt = now + 0.40;
     }
     if (mode !== 'air') return;
-    if (which === 'tuck' && tucked && !finishing && !planned) line.plan(now, [[0.14, 'open']]);
-    if (which === 'stall' && stalled && !tucked) finishAt = Math.max(now, stallAt + 0.22);   // even a tap floats for a moment
+    if (which === 'tuck' && tucked && !planned) line.plan(now, [[0.14, 'open']]);
+    if (which === 'stall' && hang) stallUntil = Math.max(now, stallAt + 0.15);   // even a tap holds the pose for a moment
   }
   for (const which of ['jump', 'tuck', 'stall']) {
     const el = $(which);
@@ -806,7 +810,7 @@ async function main() {
   // ------------------------------------------------------------ leaving the floor and meeting it again
   function takeoff() {
     mode = 'air'; takeoffAt = Infinity;
-    tucked = stalled = planned = finishing = false; whip = 1; finishAt = Infinity; landing = 'land_rise';
+    tucked = stalled = planned = hang = false; stallRate = 0; landing = 'land_rise';
     balance(com);
     turn = -leanNow();                                           // the little he is leaning back as the feet leave
     const back = tmpV.set(0, 0, -1).applyQuaternion(root.quaternion);
@@ -817,7 +821,7 @@ async function main() {
     plainLean = onLedge ? 8 + 14 * charge : 9;
     vel.copy(back).multiplyScalar(onLedge ? 0.2 + 1.1 * charge : 0.45);
     vel.y = (2.45 + 0.95 * charge) * jumpPower;
-    if (held.stall || wantStall) { startStall(); if (!held.stall) finishAt = now + 0.22; }
+    if (held.stall || wantStall) { startStall(); if (!held.stall) stallUntil = now + 0.22; }
     else if (held.tuck) startTuck();
     else line.plan(now, [[0.14, 'layout']]);                     // rise in a long line until a button says otherwise
   }
@@ -909,7 +913,7 @@ async function main() {
       root.updateMatrixWorld(true);
       const under = bodyLow(true);                               // ...less whatever of him had gone into the floor: that is the floor stopping him
       if (under < 0) { root.position.y -= under; root.updateMatrixWorld(true); }
-      say(off < 0 ? 'Short of the turn' : 'Too much turn', true);
+      say(landing === 'land_rise' ? 'No tuck, no flip' : off < 0 ? 'Short of the turn' : 'Too much turn', true);
       return;
     }
     mode = 'landing';
@@ -920,7 +924,7 @@ async function main() {
         ? [[0.04, 'land_rise'], [0.15, 'land_sink'], [0.03, 'land_sink'], [0.20, 'land_rise'], [0.28, 'stand']]   // a plain jump: the knees give, then he stands
         : [[0.05, 'land_reach'], [0.20, 'land_sink'], [0.05, 'land_sink'], [0.19, 'land_rise'], [0.29, 'stand']]);
     // (a plain jump is not a trick: nothing is said about it)
-    if (landing !== 'land_rise') say(Math.abs(off) < 14 && !(finishing && strain > 0.3) ? 'Clean landing' : 'Landed');   // a stall he had to fight round is not clean
+    if (landing !== 'land_rise') say(Math.abs(off) < 14 ? 'Clean landing' : 'Landed');
     // keep the hips where they were for this frame, and let the difference melt away
     line.hips(now, arr3);
     hips.position.set(arr3[0], arr3[1], arr3[2]);
@@ -960,8 +964,8 @@ async function main() {
 
     if (mode === 'air') {
       // gravity, and a turn as fast as the body's shape allows
-      const hanging = stalled && !tucked;
-      vel.y -= G * (hanging ? FLOAT : 1) * dt;
+      if (hang && !held.stall && now >= stallUntil) endStall();
+      vel.y -= G * (hang && held.stall ? FLOAT : 1) * dt;      // (the float: gravity is eased only while Stall is held)
       com.addScaledVector(vel, dt);
       const m = line.mix(now);
       let rate = spinPush * spinPower * (m.gain / m.inertia);
@@ -975,18 +979,19 @@ async function main() {
         // and his arms come down from overhead in good time, not in the last instant
         if (upright && !planned) { planned = true; landing = 'land_rise'; line.plan(now, [[Math.max(left, 0.2), 'land_rise']]); }
       }
-      if (hanging) {
-        rate += 4.5 * Math.max(0, 86 - turn) * ramp((now - stallAt) / 0.18);   // the float: he comes up to flat, then all but stops turning
-        // only just time left to come round: he goes for the tuck himself
-        const need = 360 - poses.squat_reach.lean - 10 - turn;
-        if (now >= finishAt || need > 1.15 * tuckRate() * Math.max(0, timeToFloor('squat_reach') - 0.14)) finishStall();
-      }
-      if (finishing) {
-        // he times the late tuck to come round onto his feet: a little harder or a little lazier, as the height allows
-        const left = timeToFloor('squat_reach');
-        if (left > 0.05) whip += (clamp((360 - poses.squat_reach.lean - turn) / left / rate, 0.4, 1.5) - whip) * (1 - Math.exp(-dt / 0.04));
-        rate *= whip;
-        if (now - stallAt > 0.2) strain = Math.max(strain, Math.abs(whip - 1));
+      if (stalled && !tucked) {
+        // The stall leans him backward slowly, toward flat, and never past it. It does not flip him:
+        // only Tuck does that.
+        if (hang) stallRate = STALL_LEAN * ramp((now - stallAt) / 0.3) * clamp((92 - turn) / 30, 0, 1);
+        else stallRate *= Math.exp(-dt / 0.15);                  // let go, the lean dies away: he stays as far over as he had got
+        rate = stallRate;
+        // Let go in time (not yet 40 degrees over), he gets his feet back under him as in a plain
+        // jump, arms coming down in good time. Further over than that there is no saving it.
+        const left = vel.y < 0 ? timeToFloor('land_rise') : Infinity;
+        if (!hang && left < 0.28 && turn <= 40) {
+          rate = (4 - turn) * 6;
+          if (!planned) { planned = true; landing = 'land_rise'; line.plan(now, [[Math.max(left, 0.2), 'land_rise']]); }
+        }
       }
       turn += rate * dt;
       turnQ.setFromAxisAngle(X_AXIS, -turn * DEG);
@@ -1004,28 +1009,28 @@ async function main() {
 
       // get ready for the floor a moment before it arrives
       // (a tucked body meets the floor lower down, in a squat, so it has longer left than an open one)
-      const toFloor = vel.y < 0 ? timeToFloor(tucked && (held.tuck || finishing) ? 'squat_reach' : plain ? 'land_rise' : 'land_reach') : Infinity;
-      if (!planned && !finishing && toFloor < 0.26) {
+      const toFloor = vel.y < 0 ? timeToFloor(tucked && held.tuck ? 'squat_reach' : tucked ? 'land_reach' : 'land_rise') : Infinity;
+      if (!planned && toFloor < 0.26) {
         // a quarter of a second out he can see whether he is anywhere near his feet; if not, he braces
         // for the floor in good time instead of snapping into it at the last instant
-        const hope = tucked && held.tuck ? 'squat_reach' : tucked ? landing : plain ? 'land_rise' : 'land_reach';
+        const hope = tucked && held.tuck ? 'squat_reach' : tucked ? landing : 'land_rise';
         const turnThen = plain ? turn : turn + rate * toFloor;
         const offThen = turnThen - wanted(hope);
         const leanThen = ((((360 - turnThen) % 360) + 540) % 360) - 180;
-        if (Math.abs(offThen) > 100) {
+        if (Math.abs(offThen) > (tucked ? 100 : 45)) {           // (with no tuck there is no coming round: leaning back past 45 degrees he is going down)
           planned = true; landing = hope;
           line.plan(now, [[Math.max(toFloor, 0.16), offThen > 0 || leanThen <= 0 ? 'fall_back' : 'fall_front']]);
         }
       }
       if (!planned && toFloor < 0.10) {
         planned = true;
-        if (tucked && (held.tuck || finishing)) landing = 'squat_reach';   // still tucked: it can only land in a squat
-        if (!tucked) landing = plain ? 'land_rise' : 'land_reach';
+        if (tucked && held.tuck) landing = 'squat_reach';       // still tucked: it can only land in a squat
+        if (!tucked) landing = 'land_rise';
         // if he can see he is nowhere near his feet, he braces for the floor instead of reaching for it
         const turnThen = plain ? turn : turn + rate * toFloor;
         const offThen = turnThen - wanted(landing);
         const leanThen = ((((360 - turnThen) % 360) + 540) % 360) - 180;
-        const brace = Math.abs(offThen) <= 100 ? landing : (offThen > 0 || leanThen <= 0 ? 'fall_back' : 'fall_front');
+        const brace = Math.abs(offThen) <= (tucked ? 100 : 45) ? landing : (offThen > 0 || leanThen <= 0 ? 'fall_back' : 'fall_front');
         line.plan(now, [[Math.max(toFloor, 0.04), brace]]);
       }
       root.updateMatrixWorld(true);
@@ -1113,7 +1118,7 @@ async function main() {
 
   renderer.setAnimationLoop(frame);
   $('cover').classList.add('gone');
-  window.__game = { get mode() { return mode; }, get turn() { return turn; }, get slide() { return cloth.slide; }, get height() { return hips.getWorldPosition(new THREE.Vector3()).y; }, get low() { return feetLow(); }, get lean() { return leanNow(); }, get fall() { return lastFall; }, get samples() { return SKIN.length; }, get at() { return root.position.toArray().map((v) => +v.toFixed(2)); }, bodyLow, landHeight, set lift(v) { aimLift = v; }, set pose(name) { line.plan(now, [[0.3, name], [1000, name]]); }, get state() { return { tucked, stalled, finishing, planned, landing, whip: +whip.toFixed(2), held: { ...held }, now: +now.toFixed(3) }; }, lowest: () => { let best = null; for (const p of SKIN) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); const h = skinV.y - floorUnder(skinV); if (!best || h < best[0]) best = [+h.toFixed(3), p.name]; } return best; },
+  window.__game = { get mode() { return mode; }, get turn() { return turn; }, get slide() { return cloth.slide; }, get height() { return hips.getWorldPosition(new THREE.Vector3()).y; }, get low() { return feetLow(); }, get lean() { return leanNow(); }, get fall() { return lastFall; }, get samples() { return SKIN.length; }, get at() { return root.position.toArray().map((v) => +v.toFixed(2)); }, bodyLow, landHeight, set lift(v) { aimLift = v; }, set pose(name) { line.plan(now, [[0.3, name], [1000, name]]); }, get state() { return { tucked, stalled, hang, planned, landing, held: { ...held }, now: +now.toFixed(3) }; }, lowest: () => { let best = null; for (const p of SKIN) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); const h = skinV.y - floorUnder(skinV); if (!best || h < best[0]) best = [+h.toFixed(3), p.name]; } return best; },
     step: (dt = 1 / 60) => frame(0, null, dt), press, release, poses, line, bones, camera, controls, root, scene, cloth };
 }
 
