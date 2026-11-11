@@ -13,7 +13,7 @@ import { OrbitControls } from './vendor/addons/controls/OrbitControls.js';
 
 // Which release of the game this is. The same number is in version.json and in the address of this
 // file in index.html: tools/publish_pages.py refuses to publish unless all three agree.
-const VERSION = 6;
+const VERSION = 7;
 
 const $ = (id) => document.getElementById(id);
 const DEG = Math.PI / 180;
@@ -593,6 +593,7 @@ async function main() {
   let finishing = false, whip = 1, strain = 0;                  // a stall's late tuck, timed by him, how hard he whips it, and the most he had to
   let wantStall = false, stallAt = 0, finishAt = Infinity;      // a tap of Stall on the floor still counts; a stall floats a moment at least
   let airBlend = 0;
+  let plainLean = 9;                                            // how far a jump with no flip in it leans back, in degrees
   let lastFall = null;                                          // which fall he took last, for looking at
   let drop = 0;                                                 // how fast he is dropping when a fall leaves him over nothing
   const hipsQBefore = [0, 0, 0, 1], hipsQDot = [0, 0, 0, 0];    // how the hips were turning as he came down
@@ -606,7 +607,7 @@ async function main() {
   // how high his balance point is when he stands in each landing pose: the time left in the air is
   // the time it takes to fall to that
   const landHeight = {};
-  for (const name of ['land_reach', 'squat_reach']) {
+  for (const name of ['land_reach', 'squat_reach', 'land_rise']) {
     const p = poses[name];
     const turned = new THREE.Quaternion().copy(hipsParentQ).multiply(new THREE.Quaternion().fromArray(p.q.Hips)).multiply(bind.world.Hips.clone().invert());
     landHeight[name] = hips.parent.localToWorld(new THREE.Vector3(...p.hips)).y - root.position.y + new THREE.Vector3(...p.centre).applyQuaternion(turned).y;
@@ -615,6 +616,8 @@ async function main() {
     const h = com.y - floorUnder(com) - landHeight[name];
     return h <= 0 ? 0 : (vel.y + Math.sqrt(vel.y * vel.y + 2 * G * h)) / G;
   };
+  // how far round each landing wants him: a flip comes all the way round to its landing's lean; a plain jump just comes down
+  const wanted = (name) => (name === 'land_rise' ? 0 : 360) - poses[name].lean;
   const tuckRate = () => spinPush * spinPower * (GAIN.tuck / poses.tuck.inertia);   // degrees a second, fully tucked
 
   let aimLift = 0;                                             // (tests look higher or lower on him with this)
@@ -736,7 +739,7 @@ async function main() {
   }
   function startStall() {
     if (stalled || tucked) return;
-    stalled = true; planned = false; stallAt = now; finishAt = Infinity;
+    stalled = true; planned = false; stallAt = now; finishAt = Infinity; landing = 'land_reach';
     line.plan(now, [[0.11, 'layout'], [0.13, 'hang']]);
   }
   // The stall is a whole flip: when Stall is let go (or there is only just time left), he whips
@@ -803,11 +806,16 @@ async function main() {
   // ------------------------------------------------------------ leaving the floor and meeting it again
   function takeoff() {
     mode = 'air'; takeoffAt = Infinity;
-    tucked = stalled = planned = finishing = false; whip = 1; finishAt = Infinity; landing = 'land_reach';
+    tucked = stalled = planned = finishing = false; whip = 1; finishAt = Infinity; landing = 'land_rise';
     balance(com);
-    turn = -leanNow();                                           // already falling backward as the feet leave
+    turn = -leanNow();                                           // the little he is leaning back as the feet leave
     const back = tmpV.set(0, 0, -1).applyQuaternion(root.quaternion);
-    vel.copy(back).multiplyScalar(0.52);
+    // On the roof a jump goes nearly straight up and comes down a foot's length behind. Off a ledge,
+    // the longer Jump was held the harder it throws him back and the further he leans: a tap hops on
+    // the spot, a full crouch carries him well clear of the edge. (Krishna, 10 November)
+    const onLedge = root.position.y > 0.05;
+    plainLean = onLedge ? 8 + 14 * charge : 9;
+    vel.copy(back).multiplyScalar(onLedge ? 0.2 + 1.1 * charge : 0.45);
     vel.y = (2.45 + 0.95 * charge) * jumpPower;
     if (held.stall || wantStall) { startStall(); if (!held.stall) finishAt = now + 0.22; }
     else if (held.tuck) startTuck();
@@ -853,13 +861,17 @@ async function main() {
         if (skinV.y > b.top - 0.02 || skinV.x <= b.minX || skinV.x >= b.maxX || skinV.z <= b.minZ || skinV.z >= b.maxZ) continue;
         need = Math.max(need, wx < 0 ? skinV.x - b.minX : wx > 0 ? b.maxX - skinV.x : wz < 0 ? skinV.z - b.minZ : b.maxZ - skinV.z);
       }
-      if (need > 0) { const go = Math.min(need + 0.01, 3.5 * dt); root.position.x += wx * go; root.position.z += wz * go; }
+      if (need > 0) {
+        const go = Math.min(need + 0.01, 3.5 * dt);
+        root.position.x += wx * go; root.position.z += wz * go;
+        toesAt.x += wx * go; toesAt.z += wz * go;                // (his feet go with him: they are not pinned inside the block)
+      }
     }
   }
 
   function touchdown(feetFirst) {
     const lean = ((((360 - turn) % 360) + 540) % 360) - 180;     // what is left of the turn, as a forward lean
-    const off = turn - (360 - poses[landing].lean);              // degrees past (or short of) the turn this landing wants
+    const off = turn - wanted(landing);                          // degrees past (or short of) the turn this landing wants
     const clean = feetFirst && Math.abs(off) <= 45;
     const leftOver = ((lean - line.mix(now).lean + 540) % 360) - 180;
     const hipsWas = hips.getWorldPosition(new THREE.Vector3());
@@ -904,8 +916,11 @@ async function main() {
     settle.lean = clamp(leftOver, -80, 80);
     line.plan(now, landing === 'squat_reach'
       ? [[0.05, 'squat_reach'], [0.14, 'land_squat'], [0.02, 'land_squat'], [0.22, 'land_rise'], [0.28, 'stand']]
-      : [[0.05, 'land_reach'], [0.20, 'land_sink'], [0.05, 'land_sink'], [0.19, 'land_rise'], [0.29, 'stand']]);
-    say(Math.abs(off) < 14 && !(finishing && strain > 0.3) ? 'Clean landing' : 'Landed');   // a stall he had to fight round is not clean
+      : landing === 'land_rise'
+        ? [[0.04, 'land_rise'], [0.15, 'land_sink'], [0.03, 'land_sink'], [0.20, 'land_rise'], [0.28, 'stand']]   // a plain jump: the knees give, then he stands
+        : [[0.05, 'land_reach'], [0.20, 'land_sink'], [0.05, 'land_sink'], [0.19, 'land_rise'], [0.29, 'stand']]);
+    // (a plain jump is not a trick: nothing is said about it)
+    if (landing !== 'land_rise') say(Math.abs(off) < 14 && !(finishing && strain > 0.3) ? 'Clean landing' : 'Landed');   // a stall he had to fight round is not clean
     // keep the hips where they were for this frame, and let the difference melt away
     line.hips(now, arr3);
     hips.position.set(arr3[0], arr3[1], arr3[2]);
@@ -950,6 +965,16 @@ async function main() {
       com.addScaledVector(vel, dt);
       const m = line.mix(now);
       let rate = spinPush * spinPower * (m.gain / m.inertia);
+      const plain = !tucked && !stalled;
+      if (plain) {
+        // A jump with no flip in it: he leans back a little as he rises and comes upright again for
+        // his feet. It is Tuck (or Stall) that adds the turn.
+        const left = vel.y < 0 ? timeToFloor('land_rise') : Infinity;
+        const upright = left < 0.28;
+        rate = ((upright ? 2 : plainLean) - turn) * 7;
+        // and his arms come down from overhead in good time, not in the last instant
+        if (upright && !planned) { planned = true; landing = 'land_rise'; line.plan(now, [[Math.max(left, 0.2), 'land_rise']]); }
+      }
       if (hanging) {
         rate += 4.5 * Math.max(0, 86 - turn) * ramp((now - stallAt) / 0.18);   // the float: he comes up to flat, then all but stops turning
         // only just time left to come round: he goes for the tuck himself
@@ -979,13 +1004,13 @@ async function main() {
 
       // get ready for the floor a moment before it arrives
       // (a tucked body meets the floor lower down, in a squat, so it has longer left than an open one)
-      const toFloor = vel.y < 0 ? timeToFloor(tucked && (held.tuck || finishing) ? 'squat_reach' : 'land_reach') : Infinity;
+      const toFloor = vel.y < 0 ? timeToFloor(tucked && (held.tuck || finishing) ? 'squat_reach' : plain ? 'land_rise' : 'land_reach') : Infinity;
       if (!planned && !finishing && toFloor < 0.26) {
         // a quarter of a second out he can see whether he is anywhere near his feet; if not, he braces
         // for the floor in good time instead of snapping into it at the last instant
-        const hope = tucked && held.tuck ? 'squat_reach' : tucked ? landing : 'land_reach';
-        const turnThen = turn + rate * toFloor;
-        const offThen = turnThen - (360 - poses[hope].lean);
+        const hope = tucked && held.tuck ? 'squat_reach' : tucked ? landing : plain ? 'land_rise' : 'land_reach';
+        const turnThen = plain ? turn : turn + rate * toFloor;
+        const offThen = turnThen - wanted(hope);
         const leanThen = ((((360 - turnThen) % 360) + 540) % 360) - 180;
         if (Math.abs(offThen) > 100) {
           planned = true; landing = hope;
@@ -995,10 +1020,10 @@ async function main() {
       if (!planned && toFloor < 0.10) {
         planned = true;
         if (tucked && (held.tuck || finishing)) landing = 'squat_reach';   // still tucked: it can only land in a squat
-        if (!tucked) landing = 'land_reach';
+        if (!tucked) landing = plain ? 'land_rise' : 'land_reach';
         // if he can see he is nowhere near his feet, he braces for the floor instead of reaching for it
-        const turnThen = turn + rate * toFloor;
-        const offThen = turnThen - (360 - poses[landing].lean);
+        const turnThen = plain ? turn : turn + rate * toFloor;
+        const offThen = turnThen - wanted(landing);
         const leanThen = ((((360 - turnThen) % 360) + 540) % 360) - 180;
         const brace = Math.abs(offThen) <= 100 ? landing : (offThen > 0 || leanThen <= 0 ? 'fall_back' : 'fall_front');
         line.plan(now, [[Math.max(toFloor, 0.04), brace]]);
