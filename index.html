@@ -58,7 +58,9 @@
       .note.show { opacity: 1; }
       .note.bad { background: var(--alert); color: var(--canvas); }
 
-      .hint { position: absolute; left: max(18px, env(safe-area-inset-left)); bottom: max(18px, env(safe-area-inset-bottom)); max-width: 30ch; font-size: 14px; line-height: 1.4; color: var(--canvas); background: rgb(17 17 17 / 0.72); padding: 12px 16px; border-radius: var(--sheet); }
+      .stick { position: absolute; left: max(22px, env(safe-area-inset-left)); bottom: max(22px, env(safe-area-inset-bottom)); width: 132px; height: 132px; border-radius: var(--pill); background: rgb(17 17 17 / 0.45); box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 0.55); display: grid; place-items: center; touch-action: none; }
+      .stick i { display: block; width: 56px; height: 56px; border-radius: var(--pill); background: rgb(255 255 255 / 0.92); box-shadow: 0 2px 8px rgb(0 0 0 / 0.3); transition: transform 60ms ease-out; pointer-events: none; }
+      .hint { position: absolute; left: max(18px, env(safe-area-inset-left)); bottom: calc(max(22px, env(safe-area-inset-bottom)) + 150px); max-width: 30ch; font-size: 14px; line-height: 1.4; color: var(--canvas); background: rgb(17 17 17 / 0.72); padding: 12px 16px; border-radius: var(--sheet); }
       .hint[hidden] { display: none; }
 
       .sheet { overscroll-behavior: contain; position: absolute; top: 68px; left: max(16px, env(safe-area-inset-left)); width: min(320px, calc(100vw - 32px)); background: var(--canvas); color: var(--ink); border-radius: var(--sheet); padding: 18px 18px 20px; display: grid; gap: 16px; }
@@ -76,7 +78,7 @@
       .bar i { display: block; height: 100%; width: 0%; background: var(--canvas); transition: width 200ms ease-out; }
       .turn { position: fixed; inset: 0; display: none; place-content: center; text-align: center; padding: 32px; background: #1b1d24; color: var(--canvas); font-size: 17px; line-height: 1.4; z-index: 6; }
       @media (orientation: portrait) and (max-width: 700px) { .turn { display: grid; } }
-      @media (max-height: 420px) { .hold { width: 72px; height: 72px; font-size: 13px; } .hold.primary { width: 90px; height: 90px; } .hint { display: none; } }
+      @media (max-height: 420px) { .hold { width: 72px; height: 72px; font-size: 13px; } .hold.primary { width: 90px; height: 90px; } .hint { display: none; } .stick { width: 112px; height: 112px; } .stick i { width: 48px; height: 48px; } }
       @media (prefers-reduced-motion: reduce) { .hold, .pill, .note, .cover, .bar i { transition: none; } }
     </style>
   </head>
@@ -105,13 +107,15 @@
           <label for="spinPower">Rotation power <output id="spinPowerOut">100%</output></label>
           <input id="spinPower" name="spinPower" type="range" min="60" max="150" step="1" value="100" autocomplete="off" />
         </div>
-        <p>Drag on the picture to look around, or use the arrow keys. Pinch or scroll to zoom.</p>
+        <p>Drag on the picture to look around, or use Q and E. Pinch or scroll to zoom.</p>
         <p>This game keeps nothing about you: no account, no cookies, no tracking.</p>
-        <p id="version">Version 9</p>
+        <p id="version">Version 10</p>
       </section>
 
-      <p class="hint" id="hint">Hold Jump to crouch, then let go to jump: the longer you hold, the higher, and off a ledge the further back. In the air, hold Tuck to flip and let go to open for the landing. Hold Stall to hang in a slow lean back; it is only a pose, so press Tuck to make the flip. On a keyboard: Space, T and S.</p>
+      <p class="hint" id="hint">Left thumb: push the stick to turn, walk or jog. Walk into a ledge to climb it. Right thumb: hold Jump and let go to jump; in the air hold Tuck to flip, or Stall to hang. On a keyboard: arrow keys (Shift to jog), Space, T and S.</p>
       <div class="note" id="note" role="status" aria-live="polite"></div>
+
+      <div class="stick" id="stick" role="group" aria-label="Walk: push the stick to turn, walk or jog"><i id="knob"></i></div>
 
       <div class="pad" aria-label="Flip controls">
         <button class="hold" id="stall">Stall</button>
@@ -122,6 +126,6 @@
 
     <div class="cover" id="cover"><span id="coverText">Loading the rooftop…</span><div class="bar"><i id="coverBar"></i></div></div>
     <div class="turn">Turn your phone sideways to play.</div>
-    <script type="module" src="./client.js?v=9"></script>
+    <script type="module" src="./client.js?v=10"></script>
   </body>
 </html>

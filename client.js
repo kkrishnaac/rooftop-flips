@@ -13,7 +13,7 @@ import { OrbitControls } from './vendor/addons/controls/OrbitControls.js';
 
 // Which release of the game this is. The same number is in version.json and in the address of this
 // file in index.html: tools/publish_pages.py refuses to publish unless all three agree.
-const VERSION = 9;
+const VERSION = 10;
 
 const $ = (id) => document.getElementById(id);
 const DEG = Math.PI / 180;
@@ -72,12 +72,14 @@ const pale = new THREE.MeshStandardMaterial({ color: 0xb9b3ab, roughness: 0.9 })
 const dark = new THREE.MeshStandardMaterial({ color: 0x4b4d57, roughness: 1.0 });
 const EDGE = 12.4;                                              // how far out the roof goes before its wall
 const BOXES = [];                                               // things to stand on: {minX, maxX, minZ, maxZ, top}
+const SOLIDS = [];                                              // things too big to climb: he walks round them
 function block(x, z, w, d, h, material, standOn = true) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
   m.position.set(x, h / 2, z);
   m.castShadow = true; m.receiveShadow = true;
   scene.add(m);
   if (standOn) BOXES.push({ minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top: h });
+  else if (Math.abs(x) < 12 && Math.abs(z) < 12) SOLIDS.push({ minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top: h });
   return m;
 }
 const roof = new THREE.Mesh(new THREE.BoxGeometry(26, 1, 26), concrete);
@@ -107,10 +109,11 @@ function groundAt(x, z) {
 // into its top (a point well down its side is passing beside it, not landing on it), and only if
 // his weight is over it too: a toe on the edge with the rest of him out in the air holds nothing up.
 const weight = new THREE.Vector3();
+let onFoot = false;                                             // walking or climbing: each foot stands on whatever is under it
 function floorUnder(p) {
   let top = 0;
   for (const b of BOXES) {
-    if (weight.x <= b.minX || weight.x >= b.maxX || weight.z <= b.minZ || weight.z >= b.maxZ) continue;
+    if (!onFoot && (weight.x <= b.minX || weight.x >= b.maxX || weight.z <= b.minZ || weight.z >= b.maxZ)) continue;
     if (p.x > b.minX && p.x < b.maxX && p.z > b.minZ && p.z < b.maxZ && p.y > b.top - 0.25) top = Math.max(top, b.top);
   }
   return top;
@@ -633,10 +636,189 @@ async function main() {
     snapCamera = snap;
     root.position.set(s.x, groundAt(s.x, s.z), s.z);
     root.quaternion.identity();
+    loco.yaw = 0; loco.speed = 0; loco.blend = 0; loco.jog = 0;
     cloth.reset();
     $('spot').textContent = `Spot: ${s.label}`;
   }
+
+  // ------------------------------------------------------------ walking and jogging
+  // Four poses make a stride: a contact and a passing pose on each foot. They are run round as a
+  // loop, as fast as he moves, so that a foot on the floor stays on the floor. The loop is mixed into
+  // whatever he is doing otherwise (standing), more of it the harder the stick is pushed.
+  function loop(names) {
+    const tl = new Timeline(poses, bodyBones), n = names.length;
+    const keys = [];
+    for (let i = -1; i <= n + 1; i++) keys.push(tl.poseKey(names[((i % n) + n) % n], i / n));
+    tl.set(keys);
+    return tl;
+  }
+  const walkLoop = loop(['walk_c_l', 'walk_p_l', 'walk_c_r', 'walk_p_r']);
+  const jogLoop = loop(['jog_c_l', 'jog_p_l', 'jog_c_r', 'jog_p_r']);
+  const STEP = { walk: 0.70, jog: 1.2 };                       // metres between one foot's print and the next
+  const loco = { blend: 0, phase: 0, speed: 0, jog: 0, yaw: 0 };
+  const pad = { x: 0, y: 0 }, arrows = { x: 0, y: 0 };          // the on-screen stick and the arrow keys: x to the right, y up the screen, each -1 to 1
+  const LIMIT = 10.1, RADIUS = 0.3;                             // how far out on the roof he may walk; how wide he is
+  const fwdV = new THREE.Vector3(), rightV = new THREE.Vector3(), wantV = new THREE.Vector3();
+  const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+  const hipsA = [0, 0, 0], hipsB = [0, 0, 0];
+  let aimYaw = null;                                            // (the tests walk a compass heading instead of a way across the screen)
   place(0);
+
+  // Keep him on the roof and out of anything solid. Says which platform he is pushing against, if it is one he could climb.
+  function resolve(y) {
+    const p = root.position;
+    let hit = null;
+    p.x = clamp(p.x, -LIMIT, LIMIT); p.z = clamp(p.z, -LIMIT, LIMIT);
+    for (const list of [SOLIDS, BOXES]) {
+      for (const b of list) {
+        if (b.top <= y + 0.02) continue;                        // he is on it, or it is below him
+        const nx = clamp(p.x, b.minX, b.maxX), nz = clamp(p.z, b.minZ, b.maxZ);
+        let ox = p.x - nx, oz = p.z - nz;
+        const d = Math.hypot(ox, oz);
+        if (d >= RADIUS) continue;
+        if (d > 1e-6) { ox /= d; oz /= d; } else {              // (the middle of him is inside: out by the nearest side)
+          const ways = [[p.x - b.minX, -1, 0], [b.maxX - p.x, 1, 0], [p.z - b.minZ, 0, -1], [b.maxZ - p.z, 0, 1]];
+          [, ox, oz] = ways.reduce((best, way) => (way[0] < best[0] ? way : best));
+        }
+        p.x = nx + ox * RADIUS; p.z = nz + oz * RADIUS;
+        if (list === BOXES && b.top - y <= 1.4) hit = { box: b, nx: -ox, nz: -oz };
+      }
+    }
+    return hit;
+  }
+
+  // What the stick asks for: turn to face that way, then walk or jog, by how hard it is pushed.
+  function walkStep(dt) {
+    let sx = clamp(pad.x + arrows.x, -1, 1), sy = clamp(pad.y + arrows.y, -1, 1);
+    const mag = Math.min(1, Math.hypot(sx, sy));
+    let target = 0, diff = 0;
+    if (mag > 0.08) {
+      camera.getWorldDirection(fwdV); fwdV.y = 0; fwdV.normalize();
+      rightV.set(-fwdV.z, 0, fwdV.x);
+      wantV.copy(fwdV).multiplyScalar(sy).addScaledVector(rightV, sx);
+      diff = wrap((aimYaw ?? Math.atan2(wantV.x, wantV.z)) - loco.yaw);
+      const rate = (loco.speed > 0.6 ? 5 : 8) * dt;             // radians a second at most
+      loco.yaw = wrap(loco.yaw + clamp(diff * (1 - Math.exp(-dt / 0.09)), -rate, rate));
+      // a gentle push turns him on the spot; a firmer one walks; a full push jogs. He walks only once he faces that way.
+      if (mag > 0.2) target = (mag < 0.65 ? 0.4 + (mag - 0.2) * 2.44 : 1.5 + (mag - 0.65) * 4.86) * clamp(1.35 - Math.abs(diff), 0, 1);   // a stroll to a brisk walk, then a jog up to 3.2 m/s
+    }
+    loco.speed += (target - loco.speed) * (1 - Math.exp(-dt / (target > loco.speed ? 0.16 : 0.10)));
+    if (target === 0 && loco.speed < 0.03) loco.speed = 0;
+    root.quaternion.setFromAxisAngle(UP, loco.yaw);
+    if (loco.speed > 0) {
+      root.position.x += Math.sin(loco.yaw) * loco.speed * dt;
+      root.position.z += Math.cos(loco.yaw) * loco.speed * dt;
+    }
+    const hit = resolve(root.position.y);
+    if (hit && target > 0.3 && Math.sin(loco.yaw) * hit.nx + Math.cos(loco.yaw) * hit.nz > 0.8 && startClimb(hit)) return;
+    // Once the middle of his body is out over nothing he goes over the edge. Walking, his weight sits a
+    // little behind his hips, so he goes when a point just behind them is out over nothing too.
+    hips.getWorldPosition(tmpV);
+    const back = loco.speed > 0.3 ? 0.14 : 0;
+    if (!hit && groundAt(tmpV.x - Math.sin(loco.yaw) * back, tmpV.z - Math.cos(loco.yaw) * back) < root.position.y - 0.1) { dropOff(); return; }
+
+    // the stride
+    const moving = loco.speed > 0.25;
+    const shuffle = !moving && mag > 0.08 && Math.abs(diff) > 0.12;            // turning on the spot: small steps
+    const want = moving ? 1 : shuffle ? 0.5 : 0;
+    loco.blend += clamp(want - loco.blend, -dt / 0.22, dt / 0.14);
+    loco.jog += (ramp((loco.speed - 1.45) / 0.5) - loco.jog) * (1 - Math.exp(-dt / 0.15));
+    const step = STEP.walk + (STEP.jog - STEP.walk) * loco.jog;
+    const stepsPerSecond = moving ? Math.max(loco.speed, 0.5) / step : shuffle ? 1.5 : 1.2;
+    if (loco.blend > 0.002) loco.phase = (loco.phase + dt * stepsPerSecond / 2) % 1;
+  }
+  // he stops being a walker (to jump, to fall, to climb): whatever he is doing becomes the pose the next movement starts from
+  function holdPose() {
+    if (loco.blend <= 0.002 && mode === 'ground') { loco.blend = 0; return; }
+    const q = {};
+    for (const b of bodyBones) q[b] = bones[b].quaternion.toArray();
+    const rest = poses.stand;
+    const key = { t: now, name: null, q, hips: hips.position.toArray(), centre: rest.centre, inertia: rest.inertia, gain: 1, lean: 0 };
+    line.set([{ ...key, t: now - 1 }, key]);
+    loco.blend = 0; loco.speed = 0;
+  }
+
+  // ------------------------------------------------------------ climbing and stepping off
+  // The low ledge is a step up and the high one a pull-up. While he climbs, the poses say how his
+  // body looks and a few "pins" say where it is: a foot or both hands are held on a place on the ledge,
+  // and the whole body is moved so that they are. (The pins are worked out from where the body would
+  // be without them, every frame, so nothing builds up.)
+  let climb = null, dropGrace = 0;
+  const ballOf = (name) => bones[name].getWorldPosition(new THREE.Vector3());
+  const ballRest = (toeRestOf.LeftToeBase.y + toeRestOf.RightToeBase.y) / 2;   // how high the ball of a foot is above the floor it stands on
+  function startClimb(hit) {
+    const b = hit.box;
+    const into = Math.abs(hit.nx) > Math.abs(hit.nz) ? { x: Math.sign(hit.nx), z: 0 } : { x: 0, z: Math.sign(hit.nz) };
+    const along = into.x ? root.position.z : root.position.x, lo = into.x ? b.minZ : b.minX, hi = into.x ? b.maxZ : b.maxX;
+    if (along < lo + 0.12 || along > hi - 0.12) return false;     // at a corner: not a place to climb
+    const dist = into.x > 0 ? b.minX - root.position.x : into.x < 0 ? root.position.x - b.maxX : into.z > 0 ? b.minZ - root.position.z : root.position.z - b.maxZ;
+    const kind = b.top - root.position.y <= 0.75 ? 'low' : 'high';
+    root.updateMatrixWorld(true);
+    const left = ballOf('LeftToeBase'), right = ballOf('RightToeBase');
+    holdPose();
+    mode = 'climb';
+    climb = { kind, box: b, into, dist, t0: now, base: root.position.clone(), y0: root.position.y, top: b.top, yaw0: loco.yaw, yaw1: Math.atan2(into.x, into.z), left, right };
+    if (kind === 'low') {
+      // the higher foot goes up first; the lower one is the one he pushes from
+      const liftLeft = left.y >= right.y - 0.01, suffix = liftLeft ? '' : '_r';
+      Object.assign(climb, { lift: liftLeft ? 'LeftToeBase' : 'RightToeBase', plant: liftLeft ? 'RightToeBase' : 'LeftToeBase', plantAt: liftLeft ? right : left, tA: 0.32, liftAt: null });
+      line.plan(now, [[0.26, `up_low_a${suffix}`], [0.06, `up_low_a${suffix}`], [0.26, `up_low_b${suffix}`], [0.30, 'stand']]);
+    } else {
+      Object.assign(climb, { tReach: 0.24, tPress: 1.06 });
+      line.plan(now, [[0.10, 'reach'], [0.14, 'charge_full'], [0.26, 'mantle_reach'], [0.28, 'mantle_pull'], [0.28, 'mantle_press'], [0.32, 'land_squat'], [0.24, 'land_rise'], [0.26, 'stand']]);
+    }
+    return true;
+  }
+  const mid = new THREE.Vector3();
+  function placeClimb() {
+    const c = climb, t = now - c.t0;
+    root.quaternion.setFromAxisAngle(UP, c.yaw0 + wrap(c.yaw1 - c.yaw0) * ramp(t / 0.25));
+    root.updateMatrixWorld(true);
+    const liftNow = c.kind === 'low' ? ballOf(c.lift) : null;   // (where the lifted foot is, with the body where it was last frame)
+    const pins = [];                                             // [where that part of him is with the body unpinned, where it must be, how much]
+    root.position.copy(c.base);
+    root.updateMatrixWorld(true);
+    if (c.kind === 'low') {
+      const w = ramp((t - c.tA) / 0.10);
+      const plantTo = new THREE.Vector3(c.plantAt.x, c.y0 + ballRest, c.plantAt.z);
+      plantTo.y = c.plantAt.y + (plantTo.y - c.plantAt.y) * ramp(t / 0.12);
+      if (!c.liftAt && t >= c.tA) c.liftAt = liftNow;
+      pins.push([ballOf(c.plant), plantTo, 1 - w]);
+      if (c.liftAt) {
+        const to = c.liftAt.clone();
+        to.y = c.liftAt.y + (c.top + ballRest - c.liftAt.y) * ramp((t - c.tA) / 0.2);
+        pins.push([ballOf(c.lift), to, w]);
+      }
+    } else {
+      const reach = ramp((t - c.tReach) / 0.26), feet = ramp((t - c.tPress) / 0.32);
+      const edge = (inside, y) => new THREE.Vector3(c.base.x + c.into.x * (c.dist + inside), y, c.base.z + c.into.z * (c.dist + inside));
+      pins.push([mid.copy(ballOf('LeftHand')).add(ballOf('RightHand')).multiplyScalar(0.5).clone(), edge(0.03, c.top + 0.05), reach * (1 - feet)]);
+      pins.push([ballOf('LeftToeBase').add(ballOf('RightToeBase')).multiplyScalar(0.5), edge(0.55, c.top + ballRest), feet]);
+    }
+    for (const [at, to, w] of pins) if (w > 1e-4) root.position.addScaledVector(tmpV.copy(to).sub(at), w);
+    root.updateMatrixWorld(true);
+  }
+  function endClimb() {
+    root.position.y = climb.top;
+    climb = null; mode = 'ground';
+    loco.speed = 0; loco.blend = 0;
+    root.updateMatrixWorld(true);
+  }
+
+  // Walking off the edge of a platform: he drops, and lands as from a jump.
+  function dropOff() {
+    const carry = Math.min(loco.speed, 2.0);
+    holdPose();
+    root.updateMatrixWorld(true);
+    mode = 'air'; takeoffAt = Infinity;
+    tucked = stalled = planned = hang = false; stallRate = 0; landing = 'land_rise';
+    balance(com);
+    turn = -leanNow();
+    plainLean = 4;
+    vel.set(Math.sin(loco.yaw), 0, Math.cos(loco.yaw)).multiplyScalar(Math.max(carry * 0.7, 1.2));   // (a slow walker is still carried clear of the edge)
+    dropGrace = now + 0.12;                                      // for a moment the platform he is leaving is not the floor he lands on
+    line.plan(now, [[0.22, 'land_rise']]);
+  }
 
   // ------------------------------------------------------------ posing
   const tmpQ = new THREE.Quaternion(), tmpQ2 = new THREE.Quaternion(), tmpV = new THREE.Vector3(), arr4 = [0, 0, 0, 0], arr3 = [0, 0, 0];
@@ -651,13 +833,21 @@ async function main() {
   }
   const euler = new THREE.Euler();
 
+  const strideQ = new THREE.Quaternion(), jogQ = new THREE.Quaternion();
   function pose(inAir, trail) {
+    const striding = mode === 'ground' && loco.blend > 0.002;
     for (const b of bodyBones) {
       if (b === 'Hips' && mode === 'air') continue;
       const late = (data.always_late[b] || 0) + (data.late_in_air[b] || 0) * inAir + (data.trail_after_landing[b] || 0) * trail;
       line.bone(b, now - late, arr4);
       const bone = bones[b];
       bone.quaternion.set(arr4[0], arr4[1], arr4[2], arr4[3]);
+      if (striding) {                                            // the stride, mixed in by how much he is walking
+        walkLoop.bone(b, loco.phase, arr4);
+        strideQ.fromArray(arr4);
+        if (loco.jog > 0.002) { jogLoop.bone(b, loco.phase, arr4); strideQ.slerp(jogQ.fromArray(arr4), loco.jog); }
+        bone.quaternion.slerp(strideQ, loco.blend);
+      }
       const w = wanderOf[b];
       if (w && !reduced) {                                       // a living body is never perfectly still
         const size = w.size * (w.airOnly ? inAir : 1);
@@ -730,6 +920,7 @@ async function main() {
       // no room left behind him for another flip before the wall at the roof's edge: back to his spot first
       const behind = tmpV.set(0, 0, -1).applyQuaternion(root.quaternion).multiplyScalar(2.2).add(root.position);
       if (Math.abs(behind.x) > EDGE || Math.abs(behind.z) > EDGE) { place(spot, true); say('Back to the middle'); }
+      holdPose();
       charging = true; chargeAt = now;
       line.plan(now, [[0.18, 'reach'], [0.30, 'charge_full']]);
     }
@@ -790,7 +981,7 @@ async function main() {
   $('jumpPower').addEventListener('input', (e) => { jumpPower = e.target.value / 100; $('jumpPowerOut').textContent = percent.format(jumpPower); });
   $('spinPower').addEventListener('input', (e) => { spinPower = e.target.value / 100; $('spinPowerOut').textContent = percent.format(spinPower); });
   // looking around without a mouse or a finger: the arrow keys swing the camera round him
-  const LOOK = { ArrowLeft: [-6, 0], ArrowRight: [6, 0], ArrowUp: [0, -5], ArrowDown: [0, 5] };
+  const LOOK = { KeyQ: [-6, 0], KeyE: [6, 0], KeyR: [0, -5], KeyV: [0, 5] };
   window.addEventListener('keydown', (e) => {
     if (!LOOK[e.code] || !controls.enableRotate || e.target.tagName === 'INPUT') return;
     e.preventDefault();
@@ -799,6 +990,42 @@ async function main() {
     ball.phi = clamp(ball.phi + LOOK[e.code][1] * DEG, controls.minPolarAngle, controls.maxPolarAngle);
     camera.position.copy(controls.target).add(new THREE.Vector3().setFromSpherical(ball));
   });
+  // walking: the arrow keys (Shift to jog) or the stick on the screen
+  const ARROW = { ArrowUp: [0, 1], ArrowDown: [0, -1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
+  const arrowsDown = new Set();
+  let shiftDown = false;
+  const syncArrows = () => {
+    let x = 0, y = 0;
+    for (const k of arrowsDown) { x += ARROW[k][0]; y += ARROW[k][1]; }
+    const m = Math.hypot(x, y) || 1;
+    arrows.x = x / m * (shiftDown ? 1 : 0.5); arrows.y = y / m * (shiftDown ? 1 : 0.5);
+  };
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    shiftDown = e.shiftKey;
+    if (ARROW[e.code]) { e.preventDefault(); arrowsDown.add(e.code); }
+    syncArrows();
+  });
+  window.addEventListener('keyup', (e) => { shiftDown = e.shiftKey; arrowsDown.delete(e.code); syncArrows(); });
+  window.addEventListener('blur', () => { arrowsDown.clear(); shiftDown = false; syncArrows(); pad.x = pad.y = 0; });
+  {
+    const stick = $('stick'), knob = $('knob');
+    let id = null;
+    const aim = (e) => {
+      const r = stick.getBoundingClientRect(), radius = r.width / 2;
+      let dx = (e.clientX - r.left - radius) / radius, dy = (r.top + radius - e.clientY) / radius;
+      const m = Math.hypot(dx, dy);
+      if (m > 1) { dx /= m; dy /= m; }
+      const full = Math.min(1, m * 1.15);                        // a full push is a little short of the rim
+      pad.x = m > 0 ? dx / Math.min(1, m) * full : 0; pad.y = m > 0 ? dy / Math.min(1, m) * full : 0;
+      knob.style.transform = `translate(${dx * radius * 0.5}px, ${-dy * radius * 0.5}px)`;
+    };
+    const let_go = () => { id = null; pad.x = pad.y = 0; knob.style.transform = ''; };
+    stick.addEventListener('pointerdown', (e) => { e.preventDefault(); id = e.pointerId; stick.setPointerCapture(id); $('hint').hidden = true; aim(e); });
+    stick.addEventListener('pointermove', (e) => { if (e.pointerId === id) aim(e); });
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) stick.addEventListener(type, (e) => { if (e.pointerId === id || type === 'lostpointercapture') let_go(); });
+    stick.addEventListener('contextmenu', (e) => e.preventDefault());
+  }
   $('lock').addEventListener('click', () => {
     const locked = $('lock').getAttribute('aria-pressed') !== 'true';
     $('lock').setAttribute('aria-pressed', String(locked));
@@ -1026,8 +1253,11 @@ async function main() {
     lastTime = stamp;
     now += dt;
 
+    onFoot = mode === 'ground' || mode === 'climb';
     if (mode === 'ground' && now >= takeoffAt) { root.updateMatrixWorld(true); takeoff(); }
+    if (mode === 'ground' && !charging && takeoffAt === Infinity) walkStep(dt);
     if (mode === 'landing' && now >= stepAt) stepDown();
+    if (mode === 'climb' && now > line.end + 0.02) endClimb();
     if ((mode === 'landing' || mode === 'fall') && now > line.end + 0.05) { mode = 'ground'; pin.foot = null; }
     if (mode !== 'ground') wantStall = false;
 
@@ -1124,7 +1354,7 @@ async function main() {
         line.plan(now, [[Math.max(toFloor, 0.04), brace]]);
       }
       root.updateMatrixWorld(true);
-      if (vel.y < 0) {
+      if (vel.y < 0 && now >= dropGrace) {
         // Coming down a little short, chest toward the floor, his hands reach it a moment before his
         // feet. That is a stumble on to the hands, not a fall, so while his feet are nearly down the
         // hands do not count as landing on something else.
@@ -1136,6 +1366,11 @@ async function main() {
       }
     } else {
       line.hips(now, arr3);
+      if (mode === 'ground' && loco.blend > 0.002) {
+        walkLoop.hips(loco.phase, hipsA);
+        if (loco.jog > 0.002) { jogLoop.hips(loco.phase, hipsB); for (let i = 0; i < 3; i++) hipsA[i] += (hipsB[i] - hipsA[i]) * loco.jog; }
+        for (let i = 0; i < 3; i++) arr3[i] += (hipsA[i] - arr3[i]) * loco.blend;
+      }
       hips.position.set(arr3[0], arr3[1], arr3[2]);
       if (mode === 'landing') {
         // melt away what was left over at touchdown: the lean and the small jump in place
@@ -1160,8 +1395,10 @@ async function main() {
       }
       // keep the lower foot exactly on the floor while the poses blend
       root.updateMatrixWorld(true);
-      if (mode !== 'ground') { clearOfPlatforms(dt); root.updateMatrixWorld(true); }
-      if (mode === 'fall') {
+      if (mode !== 'ground' && mode !== 'climb') { clearOfPlatforms(dt); root.updateMatrixWorld(true); }
+      if (mode === 'climb') {
+        placeClimb();                                            // (a climb is held by its pins, not by the floor)
+      } else if (mode === 'fall') {
         // in a fall, whatever part of him is lowest rests on the floor; over nothing, he drops to it
         const low = bodyLow(true);
         if (low > 0.004) { drop += G * dt; root.position.y -= Math.min(low, drop * dt); }
@@ -1219,7 +1456,7 @@ async function main() {
   renderer.setAnimationLoop(frame);
   $('cover').classList.add('gone');
   window.__game = { get mode() { return mode; }, get turn() { return turn; }, get slide() { return cloth.slide; }, get height() { return hips.getWorldPosition(new THREE.Vector3()).y; }, get low() { return feetLow(); }, get lean() { return leanNow(); }, get fall() { return lastFall; }, get samples() { return SKIN.length; }, get at() { return root.position.toArray().map((v) => +v.toFixed(2)); }, bodyLow, landHeight, set lift(v) { aimLift = v; }, set pose(name) { line.plan(now, [[0.3, name], [1000, name]]); }, get state() { return { tucked, stalled, hang, planned, landing, grade, held: { ...held }, now: +now.toFixed(3) }; }, lowest: () => { let best = null; for (const p of SKIN) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); const h = skinV.y - floorUnder(skinV); if (!best || h < best[0]) best = [+h.toFixed(3), p.name]; } return best; },
-    step: (dt = 1 / 60) => frame(0, null, dt), press, release, poses, line, bones, camera, controls, root, scene, cloth };
+    step: (dt = 1 / 60) => frame(0, null, dt), press, release, poses, line, bones, loco, pad, arrows, walkLoop, jogLoop, STEP, move: (v) => { pad.x = v[0]; pad.y = v[1]; }, put: ([x, z]) => { root.position.set(x, groundAt(x, z), z); loco.yaw = 0; loco.speed = 0; loco.blend = 0; root.quaternion.identity(); cloth.reset(); }, walk: ([yaw, mag]) => { aimYaw = yaw === null ? null : yaw * DEG; pad.x = 0; pad.y = mag; }, contact: () => { let best = null; for (const p of FEET) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); if (!best || skinV.y < best.y) best = { x: skinV.x, y: skinV.y, z: skinV.z, name: p.name }; } return best; }, get yaw() { return loco.yaw; }, get climbing() { return !!climb; }, camera, controls, root, scene, cloth };
 }
 
 main().catch((error) => {
