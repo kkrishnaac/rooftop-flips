@@ -13,7 +13,7 @@ import { OrbitControls } from './vendor/addons/controls/OrbitControls.js';
 
 // Which release of the game this is. The same number is in version.json and in the address of this
 // file in index.html: tools/publish_pages.py refuses to publish unless all three agree.
-const VERSION = 5;
+const VERSION = 6;
 
 const $ = (id) => document.getElementById(id);
 const DEG = Math.PI / 180;
@@ -437,11 +437,13 @@ async function upToDate() {
 async function main() {
   if (!(await upToDate())) return;
   if ($('version')) $('version').textContent = `Version ${VERSION}`;   // a kept copy of an older page has no such line
-  const data = await (await fetch(`./flip_data.json?v=${VERSION}`)).json();
-  const gltf = await new GLTFLoader().loadAsync(`./character.glb?v=${VERSION}`, (e) => {
+  const stamp = new URLSearchParams(location.search).get('n') || VERSION;   // (tests add ?n=<anything> so no kept copy of a file can answer)
+  const data = await (await fetch(`./flip_data.json?v=${stamp}`)).json();
+  const gltf = await new GLTFLoader().loadAsync(`./character.glb?v=${stamp}`, (e) => {
     if (e.total) $('coverBar').style.width = `${Math.min(100, Math.round((e.loaded / e.total) * 100))}%`;
   });
 
+  const underShown = { value: 0 };                              // 0: what is under the shirt is dark; 1: it shows as skin
   const root = new THREE.Group();
   root.add(gltf.scene);
   scene.add(root);
@@ -474,6 +476,30 @@ async function main() {
       };
       o.material.needsUpdate = true;
     });
+    // What is under the shirt (a bare waist) is its own layer in the model. It is always drawn behind
+    // the shirt, and it only takes its skin colour once the shirt has really slid up off it, in the
+    // air. Until then it is as dark as the shirt, so a gap at the waist in a crouch or a squat reads
+    // as shadow under the hem, not as the cloth tearing.
+    gltf.scene.traverse((o) => {
+      if (!o.isSkinnedMesh || !/Under/.test(o.material.name)) return;
+      o.material.onBeforeCompile = (shader) => {
+        shader.uniforms.underShown = underShown;
+        shader.vertexShader = shader.vertexShader.replace('#include <project_vertex>', `#include <project_vertex>
+          {
+            vec4 back = mvPosition;
+            back.xyz += normalize(mvPosition.xyz) * 0.10;
+            vec4 clipBack = projectionMatrix * back;
+            gl_Position.z = clipBack.z / clipBack.w * gl_Position.w;
+          }`);
+        shader.fragmentShader = shader.fragmentShader
+          .replace('#include <common>', '#include <common>\nuniform float underShown;')
+          .replace('#include <map_fragment>', '#include <map_fragment>\n  diffuseColor.rgb = mix(vec3(0.013, 0.013, 0.016), diffuseColor.rgb, underShown);');
+      };
+      o.material.needsUpdate = true;
+    });
+    // the picture is small patches packed close: seen at a slant, sample it properly
+    const sharp = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+    gltf.scene.traverse((o) => { if (o.isSkinnedMesh) for (const map of [o.material.map, o.material.normalMap]) if (map) { map.anisotropy = sharp; map.needsUpdate = true; } });
   }
 
   // the rest pose, as loaded
@@ -591,6 +617,7 @@ async function main() {
   };
   const tuckRate = () => spinPush * spinPower * (GAIN.tuck / poses.tuck.inertia);   // degrees a second, fully tucked
 
+  let aimLift = 0;                                             // (tests look higher or lower on him with this)
   let snapCamera = false;                                      // the camera goes with him in one step instead of chasing him
   function place(index, snap = false) {
     const s = SPOTS[index];
@@ -1032,6 +1059,7 @@ async function main() {
       cloth.tug += (0.10 * ramp((fold - 45) / 70) - cloth.tug) * (1 - Math.exp(-dt / 0.05));
     }
     cloth.step(dt);
+    underShown.value = ramp((cloth.slide - 0.03) / 0.05);        // skin shows only where the shirt has slid up off it
     root.updateMatrixWorld(true);
 
     // the camera stays on him
@@ -1039,7 +1067,7 @@ async function main() {
     hips.getWorldPosition(lead);
     const eye = Math.max(lead.y, root.position.y + 0.9);
     if (mode === 'air') lead.copy(com); else if (mode !== 'fall') lead.copy(root.position);
-    lead.y = eye;
+    lead.y = eye + aimLift;
     const move = lead.sub(follow).multiplyScalar(snapCamera ? 1 : 1 - Math.exp(-dt / 0.12));
     snapCamera = false;
     follow.add(move);
@@ -1060,7 +1088,7 @@ async function main() {
 
   renderer.setAnimationLoop(frame);
   $('cover').classList.add('gone');
-  window.__game = { get mode() { return mode; }, get turn() { return turn; }, get slide() { return cloth.slide; }, get height() { return hips.getWorldPosition(new THREE.Vector3()).y; }, get low() { return feetLow(); }, get lean() { return leanNow(); }, get fall() { return lastFall; }, get samples() { return SKIN.length; }, get at() { return root.position.toArray().map((v) => +v.toFixed(2)); }, bodyLow, landHeight, get state() { return { tucked, stalled, finishing, planned, landing, whip: +whip.toFixed(2), held: { ...held }, now: +now.toFixed(3) }; }, lowest: () => { let best = null; for (const p of SKIN) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); const h = skinV.y - floorUnder(skinV); if (!best || h < best[0]) best = [+h.toFixed(3), p.name]; } return best; },
+  window.__game = { get mode() { return mode; }, get turn() { return turn; }, get slide() { return cloth.slide; }, get height() { return hips.getWorldPosition(new THREE.Vector3()).y; }, get low() { return feetLow(); }, get lean() { return leanNow(); }, get fall() { return lastFall; }, get samples() { return SKIN.length; }, get at() { return root.position.toArray().map((v) => +v.toFixed(2)); }, bodyLow, landHeight, set lift(v) { aimLift = v; }, set pose(name) { line.plan(now, [[0.3, name], [1000, name]]); }, get state() { return { tucked, stalled, finishing, planned, landing, whip: +whip.toFixed(2), held: { ...held }, now: +now.toFixed(3) }; }, lowest: () => { let best = null; for (const p of SKIN) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); const h = skinV.y - floorUnder(skinV); if (!best || h < best[0]) best = [+h.toFixed(3), p.name]; } return best; },
     step: (dt = 1 / 60) => frame(0, null, dt), press, release, poses, line, bones, camera, controls, root, scene, cloth };
 }
 
