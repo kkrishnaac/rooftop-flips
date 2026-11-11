@@ -13,7 +13,7 @@ import { OrbitControls } from './vendor/addons/controls/OrbitControls.js';
 
 // Which release of the game this is. The same number is in version.json and in the address of this
 // file in index.html: tools/publish_pages.py refuses to publish unless all three agree.
-const VERSION = 3;
+const VERSION = 4;
 
 const $ = (id) => document.getElementById(id);
 const DEG = Math.PI / 180;
@@ -70,6 +70,7 @@ scene.add(rim);
 const concrete = new THREE.MeshStandardMaterial({ color: 0x8f8b86, roughness: 0.95 });
 const pale = new THREE.MeshStandardMaterial({ color: 0xb9b3ab, roughness: 0.9 });
 const dark = new THREE.MeshStandardMaterial({ color: 0x4b4d57, roughness: 1.0 });
+const EDGE = 12.4;                                              // how far out the roof goes before its wall
 const BOXES = [];                                               // things to stand on: {minX, maxX, minZ, maxZ, top}
 function block(x, z, w, d, h, material, standOn = true) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
@@ -273,6 +274,7 @@ class Cloth {
     this.slide = 0; this.slideAt = new THREE.Vector3(); this.slideBefore = new THREE.Vector3(); this.baseBefore = new THREE.Vector3();
     this.prev = null;
     this.started = false;
+    this.rise = 1;                                              // how much of the shirt's ride-up is allowed right now, 0 to 1
   }
 
   read() {                                                      // where the body is right now
@@ -340,7 +342,7 @@ class Cloth {
       v.addScaledVector(weight(sl.carry), dt).addScaledVector(pull.copy(base).sub(this.slideAt), p.slide_return * dt);
       this.slideBefore.copy(this.slideAt);
       this.slideAt.addScaledVector(v, dt);
-      this.slide = clamp(pull.copy(this.slideAt).sub(base).dot(sl.axis), 0, this.data.slide.limit);
+      this.slide = clamp(pull.copy(this.slideAt).sub(base).dot(sl.axis), 0, this.data.slide.limit * this.rise);
       this.slideAt.copy(base).addScaledVector(sl.axis, this.slide);
       this.baseBefore.copy(this.slideAt);
       now = this.targets(body, this.slide);                     // the shirt's bones ride up with the slide
@@ -450,6 +452,29 @@ async function main() {
   });
   root.updateMatrixWorld(true);
 
+  // The loose shirt hangs over a bare waist. When his back bends, that skin can push through the
+  // cloth, which looks like the shirt tearing. So the skin under the shirt is drawn as if it were a
+  // hand's breadth further from the eye: the shirt always wins where it covers, and the stomach
+  // still shows where the shirt has really lifted clear. Nothing moves on the screen.
+  {
+    const top = data.cloth.slide.pivot[1], swing = data.cloth.swings[0];
+    const hem = top - swing.length * Math.abs(swing.direction[1]) - 0.02;
+    gltf.scene.traverse((o) => {
+      if (!o.isSkinnedMesh || !/Body/.test(o.material.name)) return;
+      o.material.onBeforeCompile = (shader) => {
+        shader.vertexShader = shader.vertexShader.replace('#include <project_vertex>', `#include <project_vertex>
+          {
+            float under = smoothstep(${(hem - 0.16).toFixed(3)}, ${(hem - 0.08).toFixed(3)}, position.y) * (1.0 - smoothstep(${(top - 0.02).toFixed(3)}, ${(top + 0.02).toFixed(3)}, position.y)) * (1.0 - smoothstep(0.19, 0.24, abs(position.x)));
+            vec4 back = mvPosition;
+            back.xyz += normalize(mvPosition.xyz) * (0.09 * under);
+            vec4 clipBack = projectionMatrix * back;
+            gl_Position.z = clipBack.z / clipBack.w * gl_Position.w;
+          }`);
+      };
+      o.material.needsUpdate = true;
+    });
+  }
+
   // the rest pose, as loaded
   const bind = { local: {}, position: {}, world: {}, inverse: {} };
   for (const [name, bone] of Object.entries(bones)) {
@@ -461,7 +486,6 @@ async function main() {
   const hips = bones.Hips;
   const hipsParentQ = hips.parent.getWorldQuaternion(new THREE.Quaternion());      // with the root unturned
   const toeRest = bones.LeftToeBase.getWorldPosition(new THREE.Vector3()).add(bones.RightToeBase.getWorldPosition(new THREE.Vector3())).multiplyScalar(0.5);
-  const SOLES = ['LeftToeBase', 'RightToeBase', 'LeftFoot', 'RightFoot'].map((name) => [name, bones[name].getWorldPosition(new THREE.Vector3()).y]);
 
   // every pose: each bone's turn, where the hips sit, and the numbers from Blender
   const poses = {};
@@ -496,15 +520,15 @@ async function main() {
         const name = mesh.skeleton.bones[bone].name;
         if (name.startsWith('cloth_')) continue;
         seen.add(cell);
-        SKIN.push({ mesh, i, limb: /Hand|Fingers|ForeArm|Foot|ToeBase/.test(name) });   // hands reach for the floor, and the feet are judged on their own
+        SKIN.push({ mesh, i, name, foot: /Foot|ToeBase/.test(name) });       // the feet are judged on their own
       }
     });
   }
   const skinV = new THREE.Vector3();
-  function bodyLow(limbs) {                                      // how high his lowest point is above whatever is under it
+  function bodyLow(feet) {                                       // how high his lowest point is above whatever is under it
     let low = Infinity;
     for (const p of SKIN) {
-      if (p.limb && !limbs) continue;
+      if (p.foot && !feet) continue;
       p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld);
       low = Math.min(low, skinV.y - floorUnder(skinV));
     }
@@ -514,6 +538,7 @@ async function main() {
   const line = new Timeline(poses, bodyBones);
   line.set([line.poseKey('stand', -1), line.poseKey('stand', 0)]);
   const cloth = new Cloth(data.cloth, bones, bind);
+  cloth.rise = 0.25;
 
   // how hard the default backflip has to be thrown to come round: worked out once from its own timeline
   const pushFor = (flip) => {
@@ -538,6 +563,9 @@ async function main() {
   let now = 0, mode = 'ground', spot = 0;
   let charging = false, chargeAt = 0, takeoffAt = Infinity, charge = 0;
   let turn = 0, landing = 'land_reach', planned = false, tucked = false, stalled = false, touchdownAt = -10;
+  let finishing = false, whip = 1, strain = 0;                  // a stall's late tuck, timed by him, how hard he whips it, and the most he had to
+  let wantStall = false, stallAt = 0, finishAt = Infinity;      // a tap of Stall on the floor still counts; a stall floats a moment at least
+  let airBlend = 0;
   let lastFall = null;                                          // which fall he took last, for looking at
   let drop = 0;                                                 // how fast he is dropping when a fall leaves him over nothing
   const hipsQBefore = [0, 0, 0, 1], hipsQDot = [0, 0, 0, 0];    // how the hips were turning as he came down
@@ -547,8 +575,24 @@ async function main() {
   let jumpPower = 1, spinPower = 1;
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  function place(index) {
+  // how high his balance point is when he stands in each landing pose: the time left in the air is
+  // the time it takes to fall to that
+  const landHeight = {};
+  for (const name of ['land_reach', 'squat_reach']) {
+    const p = poses[name];
+    const turned = new THREE.Quaternion().copy(hipsParentQ).multiply(new THREE.Quaternion().fromArray(p.q.Hips)).multiply(bind.world.Hips.clone().invert());
+    landHeight[name] = hips.parent.localToWorld(new THREE.Vector3(...p.hips)).y - root.position.y + new THREE.Vector3(...p.centre).applyQuaternion(turned).y;
+  }
+  const timeToFloor = (name) => {
+    const h = com.y - floorUnder(com) - landHeight[name];
+    return h <= 0 ? 0 : (vel.y + Math.sqrt(vel.y * vel.y + 2 * G * h)) / G;
+  };
+  const tuckRate = () => spinPush * spinPower * (GAIN.tuck / poses.tuck.inertia);   // degrees a second, fully tucked
+
+  let snapCamera = false;                                      // the camera goes with him in one step instead of chasing him
+  function place(index, snap = false) {
     const s = SPOTS[index];
+    snapCamera = snap;
     root.position.set(s.x, groundAt(s.x, s.z), s.z);
     root.quaternion.identity();
     cloth.reset();
@@ -603,11 +647,12 @@ async function main() {
     tmpV.copy(UP).applyQuaternion(tmpQ).applyQuaternion(tmpQ2.copy(root.quaternion).invert());
     return Math.atan2(tmpV.z, tmpV.y) / DEG;
   }
-  function feetLow() {                                           // how high the lowest part of either foot is
+  const FEET = SKIN.filter((p) => p.foot);
+  function feetLow() {                                           // how high the lowest part of either foot is: the sock itself, not its bones
     let low = Infinity;
-    for (const [name, sole] of SOLES) {
-      bones[name].getWorldPosition(tmpV);
-      low = Math.min(low, tmpV.y - sole - floorUnder(tmpV));
+    for (const p of FEET) {
+      p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld);
+      low = Math.min(low, skinV.y - floorUnder(skinV));
     }
     return low;
   }
@@ -619,18 +664,32 @@ async function main() {
     $(which).classList.add('down');
     $('hint').hidden = true;
     if (which === 'jump' && mode === 'ground' && !charging && takeoffAt === Infinity) {
+      // no room left behind him for another flip before the wall at the roof's edge: back to his spot first
+      const behind = tmpV.set(0, 0, -1).applyQuaternion(root.quaternion).multiplyScalar(2.2).add(root.position);
+      if (Math.abs(behind.x) > EDGE || Math.abs(behind.z) > EDGE) { place(spot, true); say('Back to the middle'); }
       charging = true; chargeAt = now;
       line.plan(now, [[0.18, 'reach'], [0.30, 'charge_full']]);
     }
-    if (mode !== 'air') return;
-    if (which === 'tuck' && !tucked) {
-      tucked = true; landing = 'land_reach'; planned = false;
-      line.plan(now, [[0.22, 'tuck'], [0.08, 'tuck_spot']]);
-    }
-    if (which === 'stall' && !stalled && !tucked) {
-      stalled = true; planned = false;
-      line.plan(now, [[0.11, 'layout'], [0.13, 'hang']]);
-    }
+    if (which === 'stall' && mode === 'ground' && (charging || takeoffAt !== Infinity)) wantStall = true;
+    if (mode !== 'air') return;                                  // held before the feet leave, it is picked up at takeoff
+    if (which === 'tuck') startTuck();
+    if (which === 'stall') startStall();
+  }
+  function startTuck() {
+    if (tucked) { finishing = false; return; }                   // a stall's own finish, taken over by the thumb
+    tucked = true; finishing = false; landing = 'land_reach'; planned = false;
+    line.plan(now, [[0.22, 'tuck'], [0.08, 'tuck_spot']]);
+  }
+  function startStall() {
+    if (stalled || tucked) return;
+    stalled = true; planned = false; stallAt = now; finishAt = Infinity;
+    line.plan(now, [[0.11, 'layout'], [0.13, 'hang']]);
+  }
+  // The stall is a whole flip: when Stall is let go (or there is only just time left), he whips
+  // the late tuck himself and comes round into the squat.
+  function finishStall() {
+    tucked = true; finishing = true; whip = 1; strain = 0; stallAt = now; finishAt = Infinity; landing = 'squat_reach'; planned = false;
+    line.plan(now, [[0.16, 'tuck'], [0.07, 'tuck_spot']]);
   }
   function release(which) {
     if (!held[which]) return;
@@ -643,11 +702,8 @@ async function main() {
       takeoffAt = now + 0.40;
     }
     if (mode !== 'air') return;
-    if (which === 'tuck' && tucked && !planned) line.plan(now, [[0.14, 'open']]);
-    if (which === 'stall' && stalled && !tucked) {
-      tucked = true; landing = 'squat_reach';
-      line.plan(now, [[0.16, 'tuck'], [0.07, 'tuck_spot']]);
-    }
+    if (which === 'tuck' && tucked && !finishing && !planned) line.plan(now, [[0.14, 'open']]);
+    if (which === 'stall' && stalled && !tucked) finishAt = Math.max(now, stallAt + 0.22);   // even a tap floats for a moment
   }
   for (const which of ['jump', 'tuck', 'stall']) {
     const el = $(which);
@@ -693,13 +749,15 @@ async function main() {
   // ------------------------------------------------------------ leaving the floor and meeting it again
   function takeoff() {
     mode = 'air'; takeoffAt = Infinity;
-    tucked = stalled = planned = false; landing = 'land_reach';
+    tucked = stalled = planned = finishing = false; whip = 1; finishAt = Infinity; landing = 'land_reach';
     balance(com);
     turn = -leanNow();                                           // already falling backward as the feet leave
     const back = tmpV.set(0, 0, -1).applyQuaternion(root.quaternion);
     vel.copy(back).multiplyScalar(0.52);
     vel.y = (2.45 + 0.95 * charge) * jumpPower;
-    line.plan(now, [[0.14, 'layout']]);                          // rise in a long line until a button says otherwise
+    if (held.stall || wantStall) { startStall(); if (!held.stall) finishAt = now + 0.22; }
+    else if (held.tuck) startTuck();
+    else line.plan(now, [[0.14, 'layout']]);                     // rise in a long line until a button says otherwise
   }
 
   // ------------------------------------------------------------ falls
@@ -708,10 +766,10 @@ async function main() {
   // with a lot too much he goes on to his back. Short: he pitches forward onto hands and knees,
   // and well short, down on his front. Barely turned, or over on his back: flat on the back.
   const GET_UP = {
-    fall_sit: [[0.50, 'land_squat'], [0.60, 'stand']],
-    fall_back: [[0.55, 'fall_sit'], [0.52, 'land_squat'], [0.60, 'stand']],
-    fall_hands: [[0.50, 'land_squat'], [0.60, 'stand']],
-    fall_front: [[0.50, 'fall_hands'], [0.52, 'land_squat'], [0.60, 'stand']],
+    fall_sit: [[0.50, 'land_squat'], [0.30, 'land_rise'], [0.34, 'stand']],
+    fall_back: [[0.55, 'fall_sit'], [0.52, 'land_squat'], [0.30, 'land_rise'], [0.34, 'stand']],
+    fall_hands: [[0.50, 'land_squat'], [0.30, 'land_rise'], [0.34, 'stand']],
+    fall_front: [[0.50, 'fall_hands'], [0.52, 'land_squat'], [0.30, 'land_rise'], [0.34, 'stand']],
   };
   function fallPlan(feetFirst, off, lean) {
     let down;
@@ -725,8 +783,7 @@ async function main() {
     const lie = down[down.length - 1][1];
     const some = () => 0.9 + 0.2 * Math.random();                // no two falls quite alike
     const still = (lie === 'fall_back' || lie === 'fall_front' ? 0.60 : 0.32) * (0.8 + 0.5 * Math.random());
-    const steps = [...down, [still, lie], ...GET_UP[lie]].map(([seconds, name]) => [seconds * some(), name]);
-    return { steps, lie, anchor };
+    return { down, rest: [[still, lie], ...GET_UP[lie]].map(([seconds, name]) => [seconds * some(), name]), lie, anchor };
   }
 
   // He cannot end up inside a platform he came down beside: he is slid out of it, the short way.
@@ -769,27 +826,42 @@ async function main() {
     touchdownAt = now;
     if (fall) {
       mode = 'fall'; lastFall = fall.lie; drop = Math.max(0, -vel.y);
+      // he goes down as fast as he is falling: the time it takes his hips to drop to where they will lie
+      const lieY = hips.parent.localToWorld(new THREE.Vector3(...poses[fall.down[0][1]].hips)).y;
+      const h = Math.max(0, hipsWas.y - lieY);
+      const fallTime = clamp((-drop + Math.sqrt(drop * drop + 2 * G * h)) / G * 1.25, 0.16, fall.down[0][0]);
+      const steps = [...fall.down.map(([seconds, name], k) => [k ? seconds : fallTime, name]), ...fall.rest];
       const back = tmpQ2.copy(root.quaternion).multiply(hipsParentQ).invert();
-      line.plan(now, fall.steps, {
+      line.plan(now, steps, {
         q: hips.quaternion.toArray(), qDot: hipsQDot.map((v) => v * 0.5),          // the floor takes half the turn out of him
         hips: hips.parent.worldToLocal(hipsWas.clone()).toArray(),
         hipsDot: tmpV.set(vel.x * 0.5, 0, vel.z * 0.5).applyQuaternion(back).toArray(),
         lean,
       });
+      hips.position.copy(hips.parent.worldToLocal(hipsWas.clone()));   // the floor under him moved, he did not: for this frame he is exactly where he was
+      root.updateMatrixWorld(true);
+      const under = bodyLow(true);                               // ...less whatever of him had gone into the floor: that is the floor stopping him
+      if (under < 0) { root.position.y -= under; root.updateMatrixWorld(true); }
       say(off < 0 ? 'Short of the turn' : 'Too much turn', true);
       return;
     }
     mode = 'landing';
     settle.lean = clamp(leftOver, -80, 80);
     line.plan(now, landing === 'squat_reach'
-      ? [[0.05, 'squat_reach'], [0.14, 'land_squat'], [0.06, 'land_squat'], [0.50, 'stand']]
-      : [[0.05, 'land_reach'], [0.20, 'land_sink'], [0.12, 'land_sink'], [0.38, 'stand']]);
-    say(Math.abs(off) < 14 ? 'Clean landing' : 'Landed');
+      ? [[0.05, 'squat_reach'], [0.14, 'land_squat'], [0.02, 'land_squat'], [0.22, 'land_rise'], [0.28, 'stand']]
+      : [[0.05, 'land_reach'], [0.20, 'land_sink'], [0.05, 'land_sink'], [0.19, 'land_rise'], [0.29, 'stand']]);
+    say(Math.abs(off) < 14 && !(finishing && strain > 0.3) ? 'Clean landing' : 'Landed');   // a stall he had to fight round is not clean
     // keep the hips where they were for this frame, and let the difference melt away
     line.hips(now, arr3);
     hips.position.set(arr3[0], arr3[1], arr3[2]);
     hips.updateWorldMatrix(true, false);
     settle.at.copy(hipsWas).sub(hips.getWorldPosition(tmpV));
+    // for this frame he is exactly where he was, less whatever of his feet had gone into the floor
+    const toLocal = tmpQ2.copy(root.quaternion).multiply(hipsParentQ).invert();
+    hips.position.add(tmpV.copy(settle.at).applyQuaternion(toLocal));
+    root.updateMatrixWorld(true);
+    const low = feetLow();
+    if (low < 0) { settle.at.y -= low; hips.position.add(tmpV.set(0, -low, 0).applyQuaternion(toLocal)); }
   }
 
   // ------------------------------------------------------------ every frame
@@ -805,20 +877,37 @@ async function main() {
 
     if (mode === 'ground' && now >= takeoffAt) { root.updateMatrixWorld(true); takeoff(); }
     if ((mode === 'landing' || mode === 'fall') && now > line.end + 0.05) mode = 'ground';
+    if (mode !== 'ground') wantStall = false;
 
     // where his weight is: over his balance point in the air, over his hips in a fall, over his feet otherwise
     if (mode === 'air') weight.copy(com); else if (mode === 'fall') hips.getWorldPosition(weight); else weight.copy(root.position);
     const sinceLanding = now - touchdownAt;
-    const trail = mode === 'air' ? 0 : ramp(sinceLanding / 0.12) * (mode === 'ground' && sinceLanding >= 2 ? 0 : 1);
-    const inAir = mode === 'air' ? 1 : 0;
+    const trail = mode === 'air' ? 0 : ramp(sinceLanding / 0.28) * (mode === 'ground' && sinceLanding >= 2 ? 0 : 1);
+    airBlend = clamp(airBlend + (mode === 'air' ? dt : -dt) / 0.08, 0, 1);    // what only happens in the air comes and goes over a moment
+    const inAir = airBlend;
     pose(inAir, trail);
 
     if (mode === 'air') {
       // gravity, and a turn as fast as the body's shape allows
-      vel.y -= G * (stalled && held.stall ? FLOAT : 1) * dt;
+      const hanging = stalled && !tucked;
+      vel.y -= G * (hanging ? FLOAT : 1) * dt;
       com.addScaledVector(vel, dt);
       const m = line.mix(now);
-      turn += spinPush * spinPower * (m.gain / m.inertia) * dt;
+      let rate = spinPush * spinPower * (m.gain / m.inertia);
+      if (hanging) {
+        rate += 4.5 * Math.max(0, 86 - turn) * ramp((now - stallAt) / 0.18);   // the float: he comes up to flat, then all but stops turning
+        // only just time left to come round: he goes for the tuck himself
+        const need = 360 - poses.squat_reach.lean - 10 - turn;
+        if (now >= finishAt || need > 1.15 * tuckRate() * Math.max(0, timeToFloor('squat_reach') - 0.14)) finishStall();
+      }
+      if (finishing) {
+        // he times the late tuck to come round onto his feet: a little harder or a little lazier, as the height allows
+        const left = timeToFloor('squat_reach');
+        if (left > 0.05) whip += (clamp((360 - poses.squat_reach.lean - turn) / left / rate, 0.4, 1.5) - whip) * (1 - Math.exp(-dt / 0.04));
+        rate *= whip;
+        if (now - stallAt > 0.2) strain = Math.max(strain, Math.abs(whip - 1));
+      }
+      turn += rate * dt;
       turnQ.setFromAxisAngle(X_AXIS, -turn * DEG);
       worldQ.copy(root.quaternion).multiply(turnQ);              // the whole body, turned backward about its own middle
       tmpV.set(m.centre[0], m.centre[1], m.centre[2]).applyQuaternion(worldQ);
@@ -833,14 +922,26 @@ async function main() {
       }
 
       // get ready for the floor a moment before it arrives
-      const height = com.y - floorUnder(com) - 0.78;
-      const toFloor = vel.y < 0 ? (vel.y + Math.sqrt(vel.y * vel.y + 2 * G * Math.max(height, 0))) / G : Infinity;
+      // (a tucked body meets the floor lower down, in a squat, so it has longer left than an open one)
+      const toFloor = vel.y < 0 ? timeToFloor(tucked && (held.tuck || finishing) ? 'squat_reach' : 'land_reach') : Infinity;
+      if (!planned && !finishing && toFloor < 0.26) {
+        // a quarter of a second out he can see whether he is anywhere near his feet; if not, he braces
+        // for the floor in good time instead of snapping into it at the last instant
+        const hope = tucked && held.tuck ? 'squat_reach' : tucked ? landing : 'land_reach';
+        const turnThen = turn + rate * toFloor;
+        const offThen = turnThen - (360 - poses[hope].lean);
+        const leanThen = ((((360 - turnThen) % 360) + 540) % 360) - 180;
+        if (Math.abs(offThen) > 100) {
+          planned = true; landing = hope;
+          line.plan(now, [[Math.max(toFloor, 0.16), offThen > 0 || leanThen <= 0 ? 'fall_back' : 'fall_front']]);
+        }
+      }
       if (!planned && toFloor < 0.10) {
         planned = true;
-        if (tucked && held.tuck) landing = 'squat_reach';       // still tucked: it can only land in a squat
+        if (tucked && (held.tuck || finishing)) landing = 'squat_reach';   // still tucked: it can only land in a squat
         if (!tucked) landing = 'land_reach';
         // if he can see he is nowhere near his feet, he braces for the floor instead of reaching for it
-        const turnThen = turn + spinPush * spinPower * (m.gain / m.inertia) * toFloor;
+        const turnThen = turn + rate * toFloor;
         const offThen = turnThen - (360 - poses[landing].lean);
         const leanThen = ((((360 - turnThen) % 360) + 540) % 360) - 180;
         const brace = Math.abs(offThen) <= 100 ? landing : (offThen > 0 || leanThen <= 0 ? 'fall_back' : 'fall_front');
@@ -871,7 +972,7 @@ async function main() {
         // in a fall, whatever part of him is lowest rests on the floor; over nothing, he drops to it
         const low = bodyLow(true);
         if (low > 0.004) { drop += G * dt; root.position.y -= Math.min(low, drop * dt); }
-        else { drop = 0; root.position.y -= low; }
+        else { drop = 0; root.position.y -= Math.max(low, -4.0 * dt); }   // pressed into the floor, he comes out of it over a frame or two: no jump
       } else {
         const low = feetLow();
         if (Math.abs(low) > 0.002) hips.position.add(tmpV.set(0, -low, 0).applyQuaternion(tmpQ2.copy(root.quaternion).multiply(hipsParentQ).invert()));
@@ -879,13 +980,19 @@ async function main() {
     }
 
     root.updateMatrixWorld(true);
+    // the shirt rides up in the air; on the floor it sits at the waist
+    cloth.rise += ((mode === 'air' ? 1 : 0.25) - cloth.rise) * (1 - Math.exp(-dt / (mode === 'air' ? 0.12 : 0.25)));
     cloth.step(dt);
     root.updateMatrixWorld(true);
 
     // the camera stays on him
+    // (over his feet on the ground, so a crouch does not sway the picture; on his balance point in the air)
     hips.getWorldPosition(lead);
-    lead.y = Math.max(lead.y, root.position.y + 0.9);
-    const move = lead.sub(follow).multiplyScalar(1 - Math.exp(-dt / 0.12));
+    const eye = Math.max(lead.y, root.position.y + 0.9);
+    if (mode === 'air') lead.copy(com); else if (mode !== 'fall') lead.copy(root.position);
+    lead.y = eye;
+    const move = lead.sub(follow).multiplyScalar(snapCamera ? 1 : 1 - Math.exp(-dt / 0.12));
+    snapCamera = false;
     follow.add(move);
     camera.position.add(move);
     controls.target.copy(follow);
@@ -904,8 +1011,8 @@ async function main() {
 
   renderer.setAnimationLoop(frame);
   $('cover').classList.add('gone');
-  window.__game = { get mode() { return mode; }, get turn() { return turn; }, get slide() { return cloth.slide; }, get height() { return hips.getWorldPosition(new THREE.Vector3()).y; }, get low() { return feetLow(); }, get lean() { return leanNow(); }, get fall() { return lastFall; }, get samples() { return SKIN.length; }, get at() { return root.position.toArray().map((v) => +v.toFixed(2)); }, bodyLow,
-    step: (dt = 1 / 60) => frame(0, null, dt), press, release, poses, line, bones, camera, controls };
+  window.__game = { get mode() { return mode; }, get turn() { return turn; }, get slide() { return cloth.slide; }, get height() { return hips.getWorldPosition(new THREE.Vector3()).y; }, get low() { return feetLow(); }, get lean() { return leanNow(); }, get fall() { return lastFall; }, get samples() { return SKIN.length; }, get at() { return root.position.toArray().map((v) => +v.toFixed(2)); }, bodyLow, landHeight, get state() { return { tucked, stalled, finishing, planned, landing, whip: +whip.toFixed(2), held: { ...held }, now: +now.toFixed(3) }; }, lowest: () => { let best = null; for (const p of SKIN) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); const h = skinV.y - floorUnder(skinV); if (!best || h < best[0]) best = [+h.toFixed(3), p.name]; } return best; },
+    step: (dt = 1 / 60) => frame(0, null, dt), press, release, poses, line, bones, camera, controls, root, scene, cloth };
 }
 
 main().catch((error) => {
