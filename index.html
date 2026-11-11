@@ -47,12 +47,12 @@
       .top { position: absolute; top: max(14px, env(safe-area-inset-top)); left: max(16px, env(safe-area-inset-left)); right: max(16px, env(safe-area-inset-right)); display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
       .top .group { display: flex; gap: 8px; }
 
-      .pad { position: absolute; right: max(18px, env(safe-area-inset-right)); bottom: max(18px, env(safe-area-inset-bottom)); display: grid; grid-template-columns: auto auto; grid-template-areas: "stall tuck" ". jump"; gap: 12px; align-items: end; justify-items: end; }
+      .pad { position: absolute; right: max(18px, env(safe-area-inset-right)); bottom: max(18px, env(safe-area-inset-bottom)); display: grid; grid-template-columns: auto auto; grid-template-areas: ". flip" "stall tuck" ". jump"; gap: 12px; align-items: end; justify-items: end; }
       .hold { width: 84px; height: 84px; border-radius: var(--pill); font-size: 14px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; background: rgb(17 17 17 / 0.72); color: var(--canvas); box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 0.55); transition: transform 90ms ease-out, background-color 90ms ease-out; }
       .hold.primary { width: 104px; height: 104px; background: var(--canvas); color: var(--ink); box-shadow: none; font-size: 15px; }
       .hold.down { transform: scale(0.93); background: var(--canvas); color: var(--ink); }
       .hold.primary.down { background: var(--soft); }
-      #jump { grid-area: jump; } #tuck { grid-area: tuck; } #stall { grid-area: stall; }
+      #jump { grid-area: jump; } #tuck { grid-area: tuck; } #stall { grid-area: stall; } #flip { grid-area: flip; justify-self: center; height: 36px; padding: 0 14px; }
 
       .note { position: absolute; left: 50%; top: 22%; transform: translateX(-50%); padding: 10px 18px; border-radius: var(--pill); background: var(--canvas); color: var(--ink); font-size: 15px; font-weight: 500; opacity: 0; transition: opacity 160ms ease-out; pointer-events: none; white-space: nowrap; }
       .note.show { opacity: 1; }
@@ -109,15 +109,16 @@
         </div>
         <p>Drag on the picture to look around, or use Q and E. Pinch or scroll to zoom.</p>
         <p>This game keeps nothing about you: no account, no cookies, no tracking.</p>
-        <p id="version">Version 11</p>
+        <p id="version">Version 12</p>
       </section>
 
-      <p class="hint" id="hint">Left thumb: push the stick to turn, walk or jog. Walk into a ledge to climb it. Right thumb: hold Jump and let go to jump; in the air hold Tuck to flip, or Stall to hang. On a keyboard: arrow keys (Shift to jog), Space, T and S.</p>
+      <p class="hint" id="hint">Left thumb: push the stick to turn, walk or jog. Walk into a ledge to climb it. Right thumb: hold Jump and let go to jump; in the air hold Tuck to flip, or Stall to hang. Tap the small button above Tuck to change the flip: Backflip, Full or Layout. On a keyboard: arrow keys (Shift to jog), Space, T, S, and X to change the flip.</p>
       <div class="note" id="note" role="status" aria-live="polite"></div>
 
       <div class="stick" id="stick" role="group" aria-label="Walk: push the stick to turn, walk or jog"><i id="knob"></i></div>
 
       <div class="pad" aria-label="Flip controls">
+        <button class="pill" id="flip" aria-label="Change which flip the button below does">Flip: Backflip</button>
         <button class="hold" id="stall">Stall</button>
         <button class="hold" id="tuck">Tuck</button>
         <button class="hold primary" id="jump">Jump</button>
@@ -126,6 +127,6 @@
 
     <div class="cover" id="cover"><span id="coverText">Loading the rooftop…</span><div class="bar"><i id="coverBar"></i></div></div>
     <div class="turn">Turn your phone sideways to play.</div>
-    <script type="module" src="./client.js?v=11"></script>
+    <script type="module" src="./client.js?v=12"></script>
   </body>
 </html>

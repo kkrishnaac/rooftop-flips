@@ -13,7 +13,7 @@ import { OrbitControls } from './vendor/addons/controls/OrbitControls.js';
 
 // Which release of the game this is. The same number is in version.json and in the address of this
 // file in index.html: tools/publish_pages.py refuses to publish unless all three agree.
-const VERSION = 11;
+const VERSION = 12;
 
 const $ = (id) => document.getElementById(id);
 const DEG = Math.PI / 180;
@@ -635,7 +635,7 @@ async function main() {
   let drop = 0;                                                 // how fast he is dropping when a fall leaves him over nothing
   const hipsQBefore = [0, 0, 0, 1], hipsQDot = [0, 0, 0, 0];    // how the hips were turning as he came down
   const com = new THREE.Vector3(), vel = new THREE.Vector3();
-  const settle = { lean: 0, at: new THREE.Vector3() };
+  const settle = { lean: 0, at: new THREE.Vector3(), twist: 0 };
   const toesAt = new THREE.Vector3();                           // where the balls of his feet came down
   const pin = { foot: null, at: new THREE.Vector3() };          // during a step: the one foot that stays planted, and where
   let grade = '';                                               // how the last landing went: stick, fought, step, stumble or fall
@@ -647,7 +647,7 @@ async function main() {
   // how high his balance point is when he stands in each landing pose: the time left in the air is
   // the time it takes to fall to that
   const landHeight = {};
-  for (const name of ['land_reach', 'squat_reach', 'land_rise']) {
+  for (const name of ['land_reach', 'squat_reach', 'land_rise', 'land_sink']) {
     const p = poses[name];
     const turned = new THREE.Quaternion().copy(hipsParentQ).multiply(new THREE.Quaternion().fromArray(p.q.Hips)).multiply(bind.world.Hips.clone().invert());
     landHeight[name] = hips.parent.localToWorld(new THREE.Vector3(...p.hips)).y - root.position.y + new THREE.Vector3(...p.centre).applyQuaternion(turned).y;
@@ -658,7 +658,27 @@ async function main() {
   };
   // how far round each landing wants him: a flip comes all the way round to its landing's lean; a plain jump just comes down
   const wanted = (name) => (name === 'land_rise' ? 0 : 360) - poses[name].lean;
-  const tuckRate = () => spinPush * spinPower * (GAIN.tuck / poses.tuck.inertia);   // degrees a second, fully tucked
+  // The flips the Tuck button can do (Krishna, 11 November: "in the backflip button, I should be able to
+  // change it, like swap the flips"). Each is held and let go like the tuck: `enter` is the shape he
+  // takes while the button is held, `exit` the one he opens to when it is let go, `held` the landing
+  // if it is never let go. A full also twists him once round his own length as he goes over.
+  const FLIPS = [
+    { id: 'tuck', label: 'Backflip', button: 'Tuck', shape: 'tuck', enter: [[0.22, 'tuck'], [0.08, 'tuck_spot']], fromStall: [[0.16, 'tuck'], [0.07, 'tuck_spot']], exit: [[0.14, 'open']], held: 'squat_reach' },
+    { id: 'full', label: 'Full', button: 'Full', shape: 'full_wrap', enter: [[0.15, 'full_wrap']], fromStall: [[0.14, 'full_wrap']], exit: [[0.15, 'lay_open']], held: 'land_sink', twist: true },
+    { id: 'layout', label: 'Layout', button: 'Layout', shape: 'lay_arch', enter: [[0.17, 'lay_arch']], fromStall: [[0.15, 'lay_arch']], exit: [[0.16, 'lay_open']], held: 'land_sink' },
+  ];
+  let flip = FLIPS[0], twist = 0, twistFrom = null;              // which one is chosen; how far round his own length he has twisted, in degrees; how far over he was when the twist began
+  // How fast these shapes turn him, in degrees a second at full rotation power. (A straight body turns
+  // a third as fast as a tuck for the same throw; a real layout is thrown much harder. The game gives
+  // the long shapes the speed the reference clips show: once round in a little over half a second.)
+  for (const [name, rate] of Object.entries({ lay_arch: 560, full_wrap: 580, lay_open: 240 })) GAIN[name] = rate * poses[name].inertia / spinPush;
+  const tuckRate = () => spinPush * spinPower * (GAIN[flip.shape] / poses[flip.shape].inertia);   // degrees a second, in the chosen flip's held shape
+  function chooseFlip(id) {
+    if (mode !== 'ground' && id === undefined) return;          // not in the middle of one
+    flip = id === undefined ? FLIPS[(FLIPS.indexOf(flip) + 1) % FLIPS.length] : FLIPS.find((f) => f.id === id) || flip;
+    $('flip').textContent = `Flip: ${flip.label}`;
+    $('tuck').textContent = flip.button;
+  }
 
   let aimLift = 0;                                             // (tests look higher or lower on him with this)
   let snapCamera = false;                                      // the camera goes with him in one step instead of chasing him
@@ -1024,7 +1044,7 @@ async function main() {
     holdPose();
     root.updateMatrixWorld(true);
     mode = 'air'; takeoffAt = Infinity;
-    tucked = stalled = planned = hang = false; stallRate = 0; landing = 'land_rise';
+    tucked = stalled = planned = hang = false; stallRate = 0; landing = 'land_rise'; twist = 0; twistFrom = null;
     balance(com);
     turn = -leanNow();
     plainLean = 4;
@@ -1148,7 +1168,7 @@ async function main() {
   function startTuck() {
     if (tucked) return;
     tucked = true; hang = false; landing = 'land_reach'; planned = false;
-    line.plan(now, stalled ? [[0.16, 'tuck'], [0.07, 'tuck_spot']] : [[0.22, 'tuck'], [0.08, 'tuck_spot']]);   // out of a stall the knees whip in
+    line.plan(now, stalled ? flip.fromStall : flip.enter);        // (out of a stall he goes into it quicker)
   }
   // The stall is a pose, not a flip (Krishna, 10 November: "for however long I press it, it should
   // just stall ... I still have to tap tuck in order to complete the whole flip"). While Stall is
@@ -1174,7 +1194,7 @@ async function main() {
       takeoffAt = now + 0.40;
     }
     if (mode !== 'air') return;
-    if (which === 'tuck' && tucked && !planned) line.plan(now, [[0.14, 'open']]);
+    if (which === 'tuck' && tucked && !planned) line.plan(now, flip.exit);
     if (which === 'stall' && hang) stallUntil = Math.max(now, stallAt + 0.15);   // even a tap holds the pose for a moment
   }
   for (const which of ['jump', 'tuck', 'stall']) {
@@ -1184,6 +1204,8 @@ async function main() {
     el.addEventListener('contextmenu', (e) => e.preventDefault());
   }
   const KEYS = { Space: 'jump', KeyJ: 'jump', KeyT: 'tuck', KeyF: 'tuck', KeyS: 'stall', KeyG: 'stall' };
+  $('flip').addEventListener('click', () => chooseFlip());
+  window.addEventListener('keydown', (e) => { if (e.code === 'KeyX' && !e.repeat && e.target.tagName !== 'INPUT') chooseFlip(); });
   window.addEventListener('keydown', (e) => { if (KEYS[e.code]) { e.preventDefault(); press(KEYS[e.code]); } });   // (a key already held does nothing more: press() sees to that)
   window.addEventListener('keyup', (e) => { if (KEYS[e.code]) release(KEYS[e.code]); });
   window.addEventListener('blur', () => ['jump', 'tuck', 'stall'].forEach(release));
@@ -1257,7 +1279,7 @@ async function main() {
   // ------------------------------------------------------------ leaving the floor and meeting it again
   function takeoff() {
     mode = 'air'; takeoffAt = Infinity;
-    tucked = stalled = planned = hang = false; stallRate = 0; landing = 'land_rise';
+    tucked = stalled = planned = hang = false; stallRate = 0; landing = 'land_rise'; twist = 0; twistFrom = null;
     balance(com);
     turn = -leanNow();                                           // the little he is leaning back as the feet leave
     const back = tmpV.set(0, 0, -1).applyQuaternion(root.quaternion);
@@ -1279,10 +1301,10 @@ async function main() {
   // with a lot too much he goes on to his back. Short: he pitches forward onto hands and knees,
   // and well short, down on his front. Barely turned, or over on his back: flat on the back.
   const GET_UP = {
-    fall_sit: [[0.50, 'land_squat'], [0.30, 'land_rise'], [0.34, 'stand']],
-    fall_back: [[0.55, 'fall_sit'], [0.52, 'land_squat'], [0.30, 'land_rise'], [0.34, 'stand']],
-    fall_hands: [[0.50, 'land_squat'], [0.30, 'land_rise'], [0.34, 'stand']],
-    fall_front: [[0.50, 'fall_hands'], [0.52, 'land_squat'], [0.30, 'land_rise'], [0.34, 'stand']],
+    fall_sit: [[0.50, 'land_squat'], [0.06, 'land_squat'], [0.56, 'stand']],
+    fall_back: [[0.55, 'fall_sit'], [0.52, 'land_squat'], [0.06, 'land_squat'], [0.56, 'stand']],
+    fall_hands: [[0.50, 'land_squat'], [0.06, 'land_squat'], [0.56, 'stand']],
+    fall_front: [[0.50, 'fall_hands'], [0.52, 'land_squat'], [0.06, 'land_squat'], [0.56, 'stand']],
   };
   function fallPlan(feetFirst, off, lean) {
     let down;
@@ -1408,6 +1430,7 @@ async function main() {
     }
     mode = 'landing';
     settle.lean = clamp(leftOver, -80, 80);
+    settle.twist = twist > 0.01 && twist < 359.99 ? (twist > 180 ? twist - 360 : twist) : 0;   // a full not quite twisted round: he finishes turning on his feet, as in the clip
     pin.foot = null; stepAt = Infinity; stepQueue = [];
     const some = () => 0.92 + 0.16 * Math.random();              // no two recoveries quite alike
     const vary = (steps) => steps.map(([seconds, name]) => [seconds * some(), name]);
@@ -1415,6 +1438,11 @@ async function main() {
     // (turned too far, he is more upright than the landing's own fold: he does not bow forward into
     // it first, he goes straight to taking his weight)
     const over = off > 14;
+    // (Krishna, 11 November, on the layout clip: "when the person is landing, he squats a bit first, and
+    // then his torso and legs ... goes right back to standing, like with his torso and his knees and
+    // everything getting straight together. And in our game, as soon as the character's toes touch the
+    // ground, the back goes straight. Do not do that." So every flip's landing goes down into a squat
+    // with the chest still forward, waits a moment, and comes up in one movement.)
     const down = squat ? [[0.05, 'squat_reach'], [0.14, 'land_squat']] : over ? [] : [[0.05, 'land_reach']];
     const up = [[0.26, 'land_rise'], [0.28, 'stand']];
     let stepping = [];                                           // [pose, the foot that steps in it]
@@ -1429,16 +1457,16 @@ async function main() {
         line.plan(now, vary([...down, [0.22, 'step_fwd_r'], ...up]));
       } else {
         // further forward than a step can catch: both hands go down, and he pushes back up off them
-        line.plan(now, vary([...down, [0.22, 'stumble_hands'], [0.12, 'stumble_hands'], [0.30, 'land_squat'], [0.24, 'land_rise'], [0.28, 'stand']]));
+        line.plan(now, vary([...down, [0.22, 'stumble_hands'], [0.12, 'stumble_hands'], [0.30, 'land_squat'], [0.08, 'land_squat'], [0.50, 'stand']]));
       }
       stepQueue = stepping.map(([name, foot]) => ({ foot, at: line.keys.find((key) => key.name === name && key.t > now).t }));
     } else {
       line.plan(now, squat
-        ? [[0.05, 'squat_reach'], [0.14, 'land_squat'], [0.02, 'land_squat'], [0.22, 'land_rise'], [0.28, 'stand']]
+        ? [[0.05, 'squat_reach'], [0.14, 'land_squat'], [0.12, 'land_squat'], [0.50, 'stand']]
         : landing === 'land_rise'
-          ? [[0.04, 'land_rise'], [0.15, 'land_sink'], [0.03, 'land_sink'], [0.20, 'land_rise'], [0.28, 'stand']]   // a plain jump: the knees give, then he stands
-          : over ? [[0.20, 'land_sink'], [0.05, 'land_sink'], [0.19, 'land_rise'], [0.29, 'stand']]
-            : [[0.05, 'land_reach'], [0.20, 'land_sink'], [0.05, 'land_sink'], [0.19, 'land_rise'], [0.29, 'stand']]);
+          ? [[0.04, 'land_rise'], [0.15, 'land_sink'], [0.05, 'land_sink'], [0.40, 'stand']]   // a plain jump: the knees give, then he stands
+          : over || landing === 'land_sink' ? [[0.20, 'land_sink'], [0.08, 'land_sink'], [0.42, 'stand']]   // (turned too far, or laid out to the floor: he comes down more upright, so the squat is a shallow one)
+            : [[0.05, 'land_reach'], [0.17, 'land_deep'], [0.18, 'land_deep'], [0.50, 'stand']]);   // (the clip: down in 0.13 s, low for about 0.2 s, up in 0.5 s)
     }
     // (a plain jump is not a trick: nothing is said about it)
     if (landing !== 'land_rise') say({ stick: 'Clean landing', fought: 'Landed', step: 'Stepped out', stumble: 'Stumbled' }[grade]);
@@ -1532,8 +1560,19 @@ async function main() {
         }
       }
       turn += rate * dt;
+      // A full: he twists once round his own length while he goes over. Read off the clip: the twist
+      // starts as his feet leave, is half done by a quarter of the way over and all but done before he
+      // opens for the floor. Here it runs from the moment the button goes down to 280 degrees of turn
+      // (or a third of a turn later, if the button came late), fast first and easing to its end.
+      if (flip.twist && tucked) {
+        if (twistFrom === null) twistFrom = turn;
+        const part = clamp((turn - twistFrom) / Math.max(280 - twistFrom, 120), 0, 1);
+        const want = 360 * (1 - (1 - part) * (1 - part));
+        twist = Math.max(twist, twist + (want - twist) * (1 - Math.exp(-dt / 0.05)));     // (it winds up over a moment: no jump when the button goes down)
+      }
       turnQ.setFromAxisAngle(X_AXIS, -turn * DEG);
       worldQ.copy(root.quaternion).multiply(turnQ);              // the whole body, turned backward about its own middle
+      if (twist > 0.01 && twist < 359.99) worldQ.multiply(tmpQ.setFromAxisAngle(UP, twist * DEG));
       tmpV.set(m.centre[0], m.centre[1], m.centre[2]).applyQuaternion(worldQ);
       const hipsWorld = com.clone().sub(tmpV);
       hips.parent.worldToLocal(hipsWorld);
@@ -1547,11 +1586,11 @@ async function main() {
 
       // get ready for the floor a moment before it arrives
       // (a tucked body meets the floor lower down, in a squat, so it has longer left than an open one)
-      const toFloor = vel.y < 0 ? timeToFloor(tucked && held.tuck ? 'squat_reach' : tucked ? 'land_reach' : 'land_rise') : Infinity;
+      const toFloor = vel.y < 0 ? timeToFloor(tucked && held.tuck ? flip.held : tucked ? 'land_reach' : 'land_rise') : Infinity;
       if (!planned && toFloor < 0.26) {
         // a quarter of a second out he can see whether he is anywhere near his feet; if not, he braces
         // for the floor in good time instead of snapping into it at the last instant
-        const hope = tucked && held.tuck ? 'squat_reach' : tucked ? landing : 'land_rise';
+        const hope = tucked && held.tuck ? flip.held : tucked ? landing : 'land_rise';
         // (He only gives up this early if it cannot be saved: short even if he keeps turning as fast
         // as he is, or too far round even if he opened out this instant. Otherwise he carries on,
         // and the last tenth of a second decides. Guessing a fall from the tucked speed alone made
@@ -1571,7 +1610,7 @@ async function main() {
       }
       if (!planned && toFloor < 0.10) {
         planned = true;
-        if (tucked && held.tuck) landing = 'squat_reach';       // still tucked: it can only land in a squat
+        if (tucked && held.tuck) landing = flip.held;           // still tucked: it can only land in a squat (still laid out: on straight legs)
         if (!tucked) landing = 'land_rise';
         // if he can see he is nowhere near his feet, he braces for the floor instead of reaching for it
         const turnThen = plain ? turn : turn + rate * toFloor;
@@ -1636,6 +1675,11 @@ async function main() {
         if (Math.abs(settle.lean * fade) > 0.05) {
           tmpQ.setFromAxisAngle(X_AXIS, settle.lean * fade * DEG);
           hips.quaternion.premultiply(tmpQ2.copy(hipsParentQ).invert().multiply(tmpQ).multiply(hipsParentQ));
+        }
+        if (Math.abs(settle.twist) > 0.05) {
+          // (about his own length: in the hips' own frame, as the twist was in the air)
+          tmpQ.setFromAxisAngle(UP, settle.twist * Math.exp(-sinceLanding / 0.09) * DEG);
+          hips.quaternion.multiply(tmpQ2.copy(bind.world.Hips).invert().multiply(tmpQ).multiply(bind.world.Hips));
         }
         tmpV.copy(settle.at).multiplyScalar(Math.exp(-sinceLanding / 0.06));
         hips.position.add(tmpV.applyQuaternion(tmpQ2.copy(root.quaternion).multiply(hipsParentQ).invert()));
@@ -1729,7 +1773,7 @@ async function main() {
   renderer.setAnimationLoop(frame);
   $('cover').classList.add('gone');
   window.__game = { get mode() { return mode; }, get turn() { return turn; }, get slide() { return cloth.slide; }, get height() { return hips.getWorldPosition(new THREE.Vector3()).y; }, get low() { return feetLow(); }, get lean() { return leanNow(); }, get fall() { return lastFall; }, get samples() { return SKIN.length; }, get at() { return root.position.toArray().map((v) => +v.toFixed(2)); }, bodyLow, landHeight, set lift(v) { aimLift = v; }, set pose(name) { line.plan(now, [[0.3, name], [1000, name]]); }, get state() { return { tucked, stalled, hang, planned, landing, grade, held: { ...held }, now: +now.toFixed(3) }; }, lowest: () => { let best = null; for (const p of SKIN) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); const h = skinV.y - floorUnder(skinV); if (!best || h < best[0]) best = [+h.toFixed(3), p.name]; } return best; },
-    step: (dt = 1 / 60) => frame(0, null, dt), press, release, poses, line, bones, loco, pad, arrows, walkLoop, jogLoop, STEP, move: (v) => { pad.x = v[0]; pad.y = v[1]; }, put: ([x, z]) => { root.position.set(x, groundAt(x, z), z); loco.yaw = 0; loco.speed = 0; loco.blend = 0; root.quaternion.identity(); cloth.reset(); }, walk: ([yaw, mag]) => { aimYaw = yaw === null ? null : yaw * DEG; pad.x = 0; pad.y = mag; }, contact: () => { let best = null; for (const p of FEET) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); if (!best || skinV.y < best.y) best = { x: skinV.x, y: skinV.y, z: skinV.z, name: p.name }; } return best; }, get yaw() { return loco.yaw; }, get climbing() { return !!climb; },
+    step: (dt = 1 / 60) => frame(0, null, dt), press, release, poses, line, bones, loco, pad, arrows, walkLoop, jogLoop, STEP, move: (v) => { pad.x = v[0]; pad.y = v[1]; }, put: ([x, z]) => { root.position.set(x, groundAt(x, z), z); loco.yaw = 0; loco.speed = 0; loco.blend = 0; root.quaternion.identity(); cloth.reset(); }, walk: ([yaw, mag]) => { aimYaw = yaw === null ? null : yaw * DEG; pad.x = 0; pad.y = mag; }, contact: () => { let best = null; for (const p of FEET) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); if (!best || skinV.y < best.y) best = { x: skinV.x, y: skinV.y, z: skinV.z, name: p.name }; } return best; }, get yaw() { return loco.yaw; }, get climbing() { return !!climb; }, set flip(id) { chooseFlip(id); }, pick: (id) => chooseFlip(id), get flip() { return flip.id; }, get twist() { return twist; }, tuckRate,
     // how deep the deepest part of him is inside a block or the roof, which part, and what it is in
     inside: () => { let worst = [0, '', '']; root.updateMatrixWorld(true); for (const p of SKIN) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); if (-skinV.y > worst[0]) worst = [-skinV.y, p.name, 'roof']; for (const b of ALL_BLOCKS) { if (skinV.y >= b.top || skinV.x <= b.minX || skinV.x >= b.maxX || skinV.z <= b.minZ || skinV.z >= b.maxZ) continue; const d = Math.min(skinV.x - b.minX, b.maxX - skinV.x, skinV.z - b.minZ, b.maxZ - skinV.z, b.top - skinV.y); if (d > worst[0]) worst = [d, p.name, `block ${b.top}`]; } } return [+worst[0].toFixed(3), worst[1], worst[2]]; },
     render: () => renderer.render(scene, camera), blocks: ALL_BLOCKS, camera, controls, root, scene, cloth };
