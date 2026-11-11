@@ -13,7 +13,7 @@ import { OrbitControls } from './vendor/addons/controls/OrbitControls.js';
 
 // Which release of the game this is. The same number is in version.json and in the address of this
 // file in index.html: tools/publish_pages.py refuses to publish unless all three agree.
-const VERSION = 4;
+const VERSION = 5;
 
 const $ = (id) => document.getElementById(id);
 const DEG = Math.PI / 180;
@@ -275,6 +275,7 @@ class Cloth {
     this.prev = null;
     this.started = false;
     this.rise = 1;                                              // how much of the shirt's ride-up is allowed right now, 0 to 1
+    this.tug = 0;                                               // metres the hem is drawn down over the hips when he folds at the waist
   }
 
   read() {                                                      // where the body is right now
@@ -296,7 +297,7 @@ class Cloth {
     for (const s of this.swings) {
       const c = body.carry[s.driver];
       const pivot = s.pivot.clone().applyMatrix4(c);
-      if (s.rides) pivot.addScaledVector(axis, slide);
+      if (s.rides) pivot.addScaledVector(axis, slide - this.tug);
       const rest = s.direction.clone().transformDirection(c).multiplyScalar(s.length).add(pivot);
       out[s.bone] = { pivot, rest, carry: c };
     }
@@ -394,7 +395,7 @@ class Cloth {
     // hand the result to the cloth bones
     const final = this.targets(body, this.slide);
     const slideBone = this.bones[this.data.slide.bone];
-    slideBone.position.copy(this.bind.position[this.data.slide.bone]).add(new THREE.Vector3(0, this.slide, 0).applyQuaternion(this.bind.local[this.data.slide.bone]));
+    slideBone.position.copy(this.bind.position[this.data.slide.bone]).add(new THREE.Vector3(0, this.slide - this.tug, 0).applyQuaternion(this.bind.local[this.data.slide.bone]));
     const q = new THREE.Quaternion(), inv = new THREE.Quaternion(), arc = new THREE.Quaternion();
     for (const s of this.swings) {
       const t = final[s.bone];
@@ -570,7 +571,8 @@ async function main() {
   let drop = 0;                                                 // how fast he is dropping when a fall leaves him over nothing
   const hipsQBefore = [0, 0, 0, 1], hipsQDot = [0, 0, 0, 0];    // how the hips were turning as he came down
   const com = new THREE.Vector3(), vel = new THREE.Vector3();
-  const settle = { lean: 0, at: new THREE.Vector3() };          // what is left to blend away after touchdown
+  const settle = { lean: 0, at: new THREE.Vector3() };
+  const toesAt = new THREE.Vector3();                           // where the balls of his feet came down          // what is left to blend away after touchdown
   const held = { jump: false, tuck: false, stall: false };
   let jumpPower = 1, spinPower = 1;
   const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -629,6 +631,31 @@ async function main() {
           bone.quaternion.multiply(tmpQ.setFromEuler(euler));
         }
       }
+    }
+  }
+
+  // Turn one joint a little further, about the body's own side-to-side (x) or front-to-back (z) line.
+  const BODY_AXIS = { x: new THREE.Vector3(1, 0, 0), z: new THREE.Vector3(0, 0, 1) };
+  const turnParent = new THREE.Quaternion(), turnBy = new THREE.Quaternion(), turnAxis = new THREE.Vector3();
+  function turnInBody(bone, axis, degrees) {
+    if (Math.abs(degrees) < 0.01) return;
+    bone.parent.updateWorldMatrix(true, false);
+    bone.parent.getWorldQuaternion(turnParent);
+    turnBy.setFromAxisAngle(turnAxis.copy(BODY_AXIS[axis]).applyQuaternion(root.quaternion), degrees * DEG);
+    bone.quaternion.premultiply(tmpQ.copy(turnParent).invert().multiply(turnBy).multiply(turnParent));
+  }
+  // What a body does on top of its poses: it breathes, and after a rough landing it fights for balance.
+  function alive(inAir, sinceLanding) {
+    if (reduced) return;
+    const breath = Math.sin(2 * Math.PI * 0.26 * now) * (1 - 0.8 * inAir);
+    turnInBody(bones.Spine, 'x', -1.0 * breath);                 // the chest lifts as he breathes in...
+    turnInBody(bones.LeftShoulder, 'z', 0.8 * breath);           // ...and the shoulders with it
+    turnInBody(bones.RightShoulder, 'z', -0.8 * breath);
+    if (mode === 'landing' && Math.abs(settle.lean) > 10) {
+      // the arms go out as he rocks over his feet, further the rougher the landing, then come back in
+      const fight = Math.min(1, (Math.abs(settle.lean) - 10) / 30) * Math.sin(Math.PI * Math.min(sinceLanding, 0.55) / 0.55) * Math.exp(-sinceLanding / 0.5);
+      turnInBody(bones.LeftArm, 'z', 30 * fight);
+      turnInBody(bones.RightArm, 'z', -24 * fight);
     }
   }
 
@@ -712,7 +739,7 @@ async function main() {
     el.addEventListener('contextmenu', (e) => e.preventDefault());
   }
   const KEYS = { Space: 'jump', KeyJ: 'jump', KeyT: 'tuck', KeyF: 'tuck', KeyS: 'stall', KeyG: 'stall' };
-  window.addEventListener('keydown', (e) => { if (KEYS[e.code] && !e.repeat) { e.preventDefault(); press(KEYS[e.code]); } });
+  window.addEventListener('keydown', (e) => { if (KEYS[e.code]) { e.preventDefault(); press(KEYS[e.code]); } });   // (a key already held does nothing more: press() sees to that)
   window.addEventListener('keyup', (e) => { if (KEYS[e.code]) release(KEYS[e.code]); });
   window.addEventListener('blur', () => ['jump', 'tuck', 'stall'].forEach(release));
 
@@ -815,6 +842,7 @@ async function main() {
       const toes = bones.LeftToeBase.getWorldPosition(new THREE.Vector3()).add(bones.RightToeBase.getWorldPosition(tmpV)).multiplyScalar(0.5);
       tmpV.copy(toeRest).applyQuaternion(root.quaternion);
       root.position.set(toes.x - tmpV.x, floorUnder(toes), toes.z - tmpV.z);
+      toesAt.copy(toes);
     } else {
       // he lies where he came down, carried on a hand's breadth by what speed he had
       root.position.set(0, 0, 0); root.updateMatrixWorld(true);
@@ -886,6 +914,7 @@ async function main() {
     airBlend = clamp(airBlend + (mode === 'air' ? dt : -dt) / 0.08, 0, 1);    // what only happens in the air comes and goes over a moment
     const inAir = airBlend;
     pose(inAir, trail);
+    alive(inAir, sinceLanding);
 
     if (mode === 'air') {
       // gravity, and a turn as fast as the body's shape allows
@@ -957,13 +986,20 @@ async function main() {
       hips.position.set(arr3[0], arr3[1], arr3[2]);
       if (mode === 'landing') {
         // melt away what was left over at touchdown: the lean and the small jump in place
-        const fade = Math.exp(-sinceLanding / 0.11);
-        if (Math.abs(settle.lean) * fade > 0.05) {
+        // what was left of the turn rocks out of him: quickly after a good landing; after a rough one
+        // he sways past upright once before he has it
+        const rough = landing === 'squat_reach' ? 0 : Math.min(1, Math.abs(settle.lean) / 40);   // (deep in a squat there is no room to sway)
+        const fade = Math.exp(-sinceLanding / (0.11 + 0.16 * rough)) * Math.cos(Math.PI * Math.min(sinceLanding, 0.84) / 0.42 * rough);
+        if (Math.abs(settle.lean * fade) > 0.05) {
           tmpQ.setFromAxisAngle(X_AXIS, settle.lean * fade * DEG);
           hips.quaternion.premultiply(tmpQ2.copy(hipsParentQ).invert().multiply(tmpQ).multiply(hipsParentQ));
         }
         tmpV.copy(settle.at).multiplyScalar(Math.exp(-sinceLanding / 0.06));
         hips.position.add(tmpV.applyQuaternion(tmpQ2.copy(root.quaternion).multiply(hipsParentQ).invert()));
+        // his feet stay where they came down: he sways over them, they do not slide under him
+        root.updateMatrixWorld(true);
+        bones.LeftToeBase.getWorldPosition(tmpV).add(bones.RightToeBase.getWorldPosition(skinV)).multiplyScalar(0.5);
+        hips.position.add(tmpV.set(toesAt.x - tmpV.x, 0, toesAt.z - tmpV.z).applyQuaternion(tmpQ2.copy(root.quaternion).multiply(hipsParentQ).invert()));
       }
       // keep the lower foot exactly on the floor while the poses blend
       root.updateMatrixWorld(true);
@@ -974,7 +1010,8 @@ async function main() {
         if (low > 0.004) { drop += G * dt; root.position.y -= Math.min(low, drop * dt); }
         else { drop = 0; root.position.y -= Math.max(low, -4.0 * dt); }   // pressed into the floor, he comes out of it over a frame or two: no jump
       } else {
-        const low = feetLow();
+        let low = feetLow();
+        if (mode === 'landing') low = Math.min(low, bodyLow(false));   // and no other part of him goes into the floor either
         if (Math.abs(low) > 0.002) hips.position.add(tmpV.set(0, -low, 0).applyQuaternion(tmpQ2.copy(root.quaternion).multiply(hipsParentQ).invert()));
       }
     }
@@ -982,6 +1019,18 @@ async function main() {
     root.updateMatrixWorld(true);
     // the shirt rides up in the air; on the floor it sits at the waist
     cloth.rise += ((mode === 'air' ? 1 : 0.25) - cloth.rise) * (1 - Math.exp(-dt / (mode === 'air' ? 0.12 : 0.25)));
+    {
+      // Folded at the waist (a crouch, a squat, a tuck) the trousers are drawn down over the seat and
+      // the lower back would show in a ragged strip. A shirt has slack: its hem comes down with them.
+      hips.getWorldQuaternion(tmpQ);
+      const down = tmpV.set(0, -1, 0).applyQuaternion(tmpQ.multiply(tmpQ2.copy(bind.world.Hips).invert()));
+      let fold = 0;
+      for (const side of ['Left', 'Right']) {
+        const thigh = bones[`${side}Leg`].getWorldPosition(lead).sub(bones[`${side}UpLeg`].getWorldPosition(skinV)).normalize();
+        fold += Math.acos(clamp(thigh.dot(down), -1, 1)) / DEG / 2;
+      }
+      cloth.tug += (0.10 * ramp((fold - 45) / 70) - cloth.tug) * (1 - Math.exp(-dt / 0.05));
+    }
     cloth.step(dt);
     root.updateMatrixWorld(true);
 
