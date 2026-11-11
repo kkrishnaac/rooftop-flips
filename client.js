@@ -13,7 +13,7 @@ import { OrbitControls } from './vendor/addons/controls/OrbitControls.js';
 
 // Which release of the game this is. The same number is in version.json and in the address of this
 // file in index.html: tools/publish_pages.py refuses to publish unless all three agree.
-const VERSION = 10;
+const VERSION = 11;
 
 const $ = (id) => document.getElementById(id);
 const DEG = Math.PI / 180;
@@ -58,11 +58,11 @@ const sun = new THREE.DirectionalLight(0xffd0a0, 2.7);          // low and warm
 sun.position.set(-7, 5.5, 4);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.camera.left = -6; sun.shadow.camera.right = 6; sun.shadow.camera.top = 6; sun.shadow.camera.bottom = -6;
-sun.shadow.camera.near = 0.5; sun.shadow.camera.far = 30;
+sun.shadow.camera.left = -11; sun.shadow.camera.right = 11; sun.shadow.camera.top = 11; sun.shadow.camera.bottom = -11;   // wide enough that a block's shadow is whole wherever he walks (it was cut off 6 m from him)
+sun.shadow.camera.near = 0.5; sun.shadow.camera.far = 40;
 sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.03;
 scene.add(sun, sun.target);
-const rim = new THREE.DirectionalLight(0xa9c2ff, 1.1);          // so black clothes keep an edge against the sky
+const rim = new THREE.DirectionalLight(0xd4dcf0, 1.0);          // so black clothes keep an edge against the sky (nearly white: a blue one turned them navy)
 rim.position.set(5, 3, -6);
 scene.add(rim);
 
@@ -73,6 +73,7 @@ const dark = new THREE.MeshStandardMaterial({ color: 0x4b4d57, roughness: 1.0 })
 const EDGE = 12.4;                                              // how far out the roof goes before its wall
 const BOXES = [];                                               // things to stand on: {minX, maxX, minZ, maxZ, top}
 const SOLIDS = [];                                              // things too big to climb: he walks round them
+const ALL_BLOCKS = [];                                          // both
 function block(x, z, w, d, h, material, standOn = true) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
   m.position.set(x, h / 2, z);
@@ -80,6 +81,10 @@ function block(x, z, w, d, h, material, standOn = true) {
   scene.add(m);
   if (standOn) BOXES.push({ minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top: h });
   else if (Math.abs(x) < 12 && Math.abs(z) < 12) SOLIDS.push({ minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top: h });
+  if (Math.abs(x) < 12 && Math.abs(z) < 12) {
+    m.material = material.clone();                              // (its own, so it alone can turn to glass when it is between the camera and him)
+    ALL_BLOCKS.push({ minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top: h, mesh: m, seen: 1 });
+  }
   return m;
 }
 const roof = new THREE.Mesh(new THREE.BoxGeometry(26, 1, 26), concrete);
@@ -447,6 +452,8 @@ async function main() {
   });
 
   const underShown = { value: 0 };                              // 0: what is under the shirt is dark; 1: it shows as skin
+  // the shirt's own colour, from the model's picture: what is under the shirt is drawn in it until the shirt lifts
+  const clothColour = { value: new THREE.Color().setRGB(...(data.cloth_colour || [0.16, 0.153, 0.172]), THREE.SRGBColorSpace) };
   const root = new THREE.Group();
   root.add(gltf.scene);
   scene.add(root);
@@ -487,6 +494,7 @@ async function main() {
       if (!o.isSkinnedMesh || !/Under/.test(o.material.name)) return;
       o.material.onBeforeCompile = (shader) => {
         shader.uniforms.underShown = underShown;
+        shader.uniforms.clothColour = clothColour;
         shader.vertexShader = shader.vertexShader.replace('#include <project_vertex>', `#include <project_vertex>
           {
             vec4 back = mvPosition;
@@ -496,8 +504,29 @@ async function main() {
           }`);
         shader.fragmentShader = shader.fragmentShader
           .replace('#include <common>', '#include <common>\nuniform float underShown;')
-          .replace('#include <map_fragment>', '#include <map_fragment>\n  diffuseColor.rgb = mix(vec3(0.013, 0.013, 0.016), diffuseColor.rgb, underShown);');
+          .replace('#include <common>', '#include <common>\nuniform vec3 clothColour;')
+          .replace('#include <map_fragment>', '#include <map_fragment>\n  diffuseColor.rgb = mix(clothColour, diffuseColor.rgb, underShown);');
       };
+      o.material.needsUpdate = true;
+    });
+    // Black cloth stays black. The evening's light is coloured (a warm sun on one side, a cool sky on
+    // the other), and on black cloth that showed as brown from the front and navy from behind
+    // (Krishna, 11 November: "the t-shirt color is changing, like to blue"). So whatever is as dark as
+    // the cloth is lit by the light's brightness only, not its colour. Skin keeps the evening's warmth.
+    const clothDark = Math.max(clothColour.value.r, clothColour.value.g, clothColour.value.b);
+    gltf.scene.traverse((o) => {
+      if (!o.isSkinnedMesh) return;
+      const before = o.material.onBeforeCompile, allCloth = /Shirt/.test(o.material.name);
+      o.material.onBeforeCompile = (shader, renderer) => {
+        before?.call(o.material, shader, renderer);
+        shader.fragmentShader = shader.fragmentShader.replace('#include <opaque_fragment>', `
+          {
+            float cloth = ${allCloth ? '1.0' : `1.0 - smoothstep(${(clothDark * 2.2).toFixed(4)}, ${(clothDark * 5.0).toFixed(4)}, max(diffuseColor.r, max(diffuseColor.g, diffuseColor.b)))`};
+            outgoingLight = mix(outgoingLight, vec3(dot(outgoingLight, vec3(0.2126, 0.7152, 0.0722))), cloth);
+          }
+          #include <opaque_fragment>`);
+      };
+      o.material.customProgramCacheKey = () => `rooftop-${o.material.name}`;
       o.material.needsUpdate = true;
     });
     // the picture is small patches packed close: seen at a slant, sample it properly
@@ -506,8 +535,9 @@ async function main() {
   }
 
   // the rest pose, as loaded
-  const bind = { local: {}, position: {}, world: {}, inverse: {} };
+  const bind = { local: {}, position: {}, world: {}, inverse: {}, rest: {} };
   for (const [name, bone] of Object.entries(bones)) {
+    bind.rest[name] = bone.getWorldPosition(new THREE.Vector3());
     bind.local[name] = bone.quaternion.clone();
     bind.position[name] = bone.position.clone();
     bind.world[name] = bone.getWorldQuaternion(new THREE.Quaternion());
@@ -516,6 +546,7 @@ async function main() {
   const hips = bones.Hips;
   const hipsParentQ = hips.parent.getWorldQuaternion(new THREE.Quaternion());      // with the root unturned
   const toeRest = bones.LeftToeBase.getWorldPosition(new THREE.Vector3()).add(bones.RightToeBase.getWorldPosition(new THREE.Vector3())).multiplyScalar(0.5);
+  const ankleRest = (bones.LeftFoot.getWorldPosition(new THREE.Vector3()).y + bones.RightFoot.getWorldPosition(new THREE.Vector3()).y) / 2;   // how high an ankle is above the floor he stands on
   const toeRestOf = { LeftToeBase: bones.LeftToeBase.getWorldPosition(new THREE.Vector3()), RightToeBase: bones.RightToeBase.getWorldPosition(new THREE.Vector3()) };
 
   // every pose: each bone's turn, where the hips sit, and the numbers from Blender
@@ -657,7 +688,7 @@ async function main() {
   const STEP = { walk: 0.70, jog: 1.2 };                       // metres between one foot's print and the next
   const loco = { blend: 0, phase: 0, speed: 0, jog: 0, yaw: 0 };
   const pad = { x: 0, y: 0 }, arrows = { x: 0, y: 0 };          // the on-screen stick and the arrow keys: x to the right, y up the screen, each -1 to 1
-  const LIMIT = 10.1, RADIUS = 0.3;                             // how far out on the roof he may walk; how wide he is
+  const LIMIT = 10.1, RADIUS = 0.34;                             // how far out on the roof he may walk; how wide he is
   const fwdV = new THREE.Vector3(), rightV = new THREE.Vector3(), wantV = new THREE.Vector3();
   const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
   const hipsA = [0, 0, 0], hipsB = [0, 0, 0];
@@ -665,7 +696,7 @@ async function main() {
   place(0);
 
   // Keep him on the roof and out of anything solid. Says which platform he is pushing against, if it is one he could climb.
-  function resolve(y) {
+  function resolve(y, most = Infinity) {
     const p = root.position;
     let hit = null;
     p.x = clamp(p.x, -LIMIT, LIMIT); p.z = clamp(p.z, -LIMIT, LIMIT);
@@ -680,11 +711,39 @@ async function main() {
           const ways = [[p.x - b.minX, -1, 0], [b.maxX - p.x, 1, 0], [p.z - b.minZ, 0, -1], [b.maxZ - p.z, 0, 1]];
           [, ox, oz] = ways.reduce((best, way) => (way[0] < best[0] ? way : best));
         }
-        p.x = nx + ox * RADIUS; p.z = nz + oz * RADIUS;
+        // (he is moved out by as much as he walked in, no more: landed or fallen nearer to a wall than he
+        // would walk, he is not snapped away from it when he stands)
+        const out = Math.min(RADIUS - d, most);
+        p.x += ox * out; p.z += oz * out;
         if (list === BOXES && b.top - y <= 1.4) hit = { box: b, nx: -ox, nz: -oz };
       }
     }
     return hit;
+  }
+
+  // How far he can go that way before something solid stops him (the roof's limit, a block he is
+  // not standing level with), and what that is: the block, and which way its face looks at him.
+  const ahead = { room: Infinity, box: null, nx: 0, nz: 0 };
+  function roomAhead(dx, dz) {
+    const p = root.position;
+    ahead.room = Infinity; ahead.box = null;
+    if (dx > 1e-6) ahead.room = Math.min(ahead.room, (LIMIT - p.x) / dx); else if (dx < -1e-6) ahead.room = Math.min(ahead.room, (-LIMIT - p.x) / dx);
+    if (dz > 1e-6) ahead.room = Math.min(ahead.room, (LIMIT - p.z) / dz); else if (dz < -1e-6) ahead.room = Math.min(ahead.room, (-LIMIT - p.z) / dz);
+    for (const list of [SOLIDS, BOXES]) {
+      for (const b of list) {
+        if (b.top <= p.y + 0.02) continue;
+        // where the line of his walk enters the block, grown by his own width, and through which side
+        let enter = -Infinity, leave = Infinity, nx = 0, nz = 0;
+        for (const [o, d, lo, hi, x] of [[p.x, dx, b.minX - RADIUS, b.maxX + RADIUS, true], [p.z, dz, b.minZ - RADIUS, b.maxZ + RADIUS, false]]) {
+          if (Math.abs(d) < 1e-6) { if (o <= lo || o >= hi) { enter = Infinity; break; } continue; }
+          const t1 = (lo - o) / d, t2 = (hi - o) / d;
+          if (Math.min(t1, t2) > enter) { enter = Math.min(t1, t2); nx = x ? Math.sign(d) : 0; nz = x ? 0 : Math.sign(d); }
+          leave = Math.min(leave, Math.max(t1, t2));
+        }
+        if (enter < leave && leave > 0 && Math.max(enter, 0) < ahead.room) { ahead.room = Math.max(enter, 0); ahead.box = list === BOXES && b.top - p.y <= 1.4 ? b : null; ahead.nx = nx; ahead.nz = nz; }
+      }
+    }
+    return ahead.room;
   }
 
   // What the stick asks for: turn to face that way, then walk or jog, by how hard it is pushed.
@@ -703,13 +762,23 @@ async function main() {
       if (mag > 0.2) target = (mag < 0.65 ? 0.4 + (mag - 0.2) * 2.44 : 1.5 + (mag - 0.65) * 4.86) * clamp(1.35 - Math.abs(diff), 0, 1);   // a stroll to a brisk walk, then a jog up to 3.2 m/s
     }
     loco.speed += (target - loco.speed) * (1 - Math.exp(-dt / (target > loco.speed ? 0.16 : 0.10)));
+    // He does not stride into a wall: he slows as it comes up, to arrive at it standing. (A foot is
+    // further forward in a stride than he is wide, and went into the block.)
+    loco.speed = Math.min(loco.speed, 0.12 + Math.max(0, roomAhead(Math.sin(loco.yaw), Math.cos(loco.yaw))) / 0.24);
     if (target === 0 && loco.speed < 0.03) loco.speed = 0;
     root.quaternion.setFromAxisAngle(UP, loco.yaw);
+    const fromX = root.position.x, fromZ = root.position.z;
     if (loco.speed > 0) {
       root.position.x += Math.sin(loco.yaw) * loco.speed * dt;
       root.position.z += Math.cos(loco.yaw) * loco.speed * dt;
     }
-    const hit = resolve(root.position.y);
+    // Walking at a ledge he can climb, he starts up it a step before he would touch it.
+    if (ahead.box && target > 0.3 && ahead.room < (ahead.box.top - root.position.y <= 0.75 ? 0.26 : 0.14)
+      && Math.sin(loco.yaw) * ahead.nx + Math.cos(loco.yaw) * ahead.nz > 0.8 && startClimb({ box: ahead.box, nx: ahead.nx, nz: ahead.nz })) return;
+    const hit = resolve(root.position.y, loco.speed * dt * 1.5 + 0.0005);
+    // (and held by a wall, or sliding along one, he strides only as fast as he is really going)
+    const really = Math.hypot(root.position.x - fromX, root.position.z - fromZ) / dt;
+    if (really < loco.speed * 0.8) loco.speed += (really - loco.speed) * (1 - Math.exp(-dt / 0.06));
     if (hit && target > 0.3 && Math.sin(loco.yaw) * hit.nx + Math.cos(loco.yaw) * hit.nz > 0.8 && startClimb(hit)) return;
     // Once the middle of his body is out over nothing he goes over the edge. Walking, his weight sits a
     // little behind his hips, so he goes when a point just behind them is out over nothing too.
@@ -718,13 +787,14 @@ async function main() {
     if (!hit && groundAt(tmpV.x - Math.sin(loco.yaw) * back, tmpV.z - Math.cos(loco.yaw) * back) < root.position.y - 0.1) { dropOff(); return; }
 
     // the stride
-    const moving = loco.speed > 0.25;
+    const moving = loco.speed > 0.12;
     const shuffle = !moving && mag > 0.08 && Math.abs(diff) > 0.12;            // turning on the spot: small steps
-    const want = moving ? 1 : shuffle ? 0.5 : 0;
+    // (slowly, he takes short steps: the stride is mixed in by how fast he goes, and its pace kept to match)
+    const want = moving ? clamp(loco.speed / 0.9, 0.25, 1) : shuffle ? 0.4 : 0;
     loco.blend += clamp(want - loco.blend, -dt / 0.22, dt / 0.14);
     loco.jog += (ramp((loco.speed - 1.45) / 0.5) - loco.jog) * (1 - Math.exp(-dt / 0.15));
-    const step = STEP.walk + (STEP.jog - STEP.walk) * loco.jog;
-    const stepsPerSecond = moving ? Math.max(loco.speed, 0.5) / step : shuffle ? 1.5 : 1.2;
+    const step = (STEP.walk + (STEP.jog - STEP.walk) * loco.jog) * Math.max(loco.blend, 0.25);
+    const stepsPerSecond = moving ? Math.min(loco.speed / step, 3.4) : shuffle ? 1.5 : 1.2;
     if (loco.blend > 0.002) loco.phase = (loco.phase + dt * stepsPerSecond / 2) % 1;
   }
   // he stops being a walker (to jump, to fall, to climb): whatever he is doing becomes the pose the next movement starts from
@@ -738,68 +808,211 @@ async function main() {
     loco.blend = 0; loco.speed = 0;
   }
 
+  // ------------------------------------------------------------ reaching
+  // A leg or an arm bent so that its end (ankle or wrist) is at a given place: the thigh and shin
+  // (upper arm and forearm) are swung so the two of them span from the hip to the place asked for,
+  // with the knee (elbow) out toward `pole`. Out of reach, the limb stretches toward it.
+  const ikH = new THREE.Vector3(), ikK = new THREE.Vector3(), ikE = new THREE.Vector3(), ikT = new THREE.Vector3(), ikS = new THREE.Vector3(), ikK2 = new THREE.Vector3(), ikA = new THREE.Vector3(), ikB = new THREE.Vector3();
+  const ikQ = new THREE.Quaternion(), ikP = new THREE.Quaternion(), ikU0 = new THREE.Quaternion(), ikL0 = new THREE.Quaternion(), ikN = new THREE.Quaternion();
+  function swing(bone, from, to) {                              // turn a bone, in the world, so that the direction `from` becomes `to`
+    bone.parent.updateWorldMatrix(true, false);
+    bone.parent.getWorldQuaternion(ikP);
+    ikQ.setFromUnitVectors(from, to);
+    bone.quaternion.premultiply(ikN.copy(ikP).invert().multiply(ikQ).multiply(ikP));
+  }
+  function reach(upper, lower, end, target, pole, weight = 1) {
+    if (weight <= 0.001) return;
+    upper.updateWorldMatrix(true, true);
+    upper.getWorldPosition(ikH); lower.getWorldPosition(ikK); end.getWorldPosition(ikE);
+    const l1 = ikH.distanceTo(ikK), l2 = ikK.distanceTo(ikE);
+    ikT.copy(target).sub(ikH);
+    // (nearly out of reach the limb straightens gently, never quite: reaching the limit all at once snaps the knee straight)
+    const full = l1 + l2 - 0.004, soft = 0.07, far = ikT.length();
+    const d = Math.max(Math.abs(l1 - l2) + 0.03, far < full - soft ? far : full - soft * Math.exp(-(far - (full - soft)) / soft));
+    ikT.normalize();
+    const along = (l1 * l1 - l2 * l2 + d * d) / (2 * d), out = Math.sqrt(Math.max(0, l1 * l1 - along * along));
+    ikS.copy(pole).addScaledVector(ikT, -pole.dot(ikT));
+    if (ikS.lengthSq() < 1e-8) ikS.set(0, 1, 0).addScaledVector(ikT, -ikT.y);
+    ikS.normalize();
+    ikK2.copy(ikH).addScaledVector(ikT, along).addScaledVector(ikS, out);     // where the knee (or elbow) goes
+    ikU0.copy(upper.quaternion); ikL0.copy(lower.quaternion);
+    swing(upper, ikA.copy(ikK).sub(ikH).normalize(), ikB.copy(ikK2).sub(ikH).normalize());
+    upper.updateWorldMatrix(false, true);
+    lower.getWorldPosition(ikK); end.getWorldPosition(ikE);
+    swing(lower, ikA.copy(ikE).sub(ikK).normalize(), ikB.copy(ikH).addScaledVector(ikT, d).sub(ikK).normalize());
+    if (weight < 1) {
+      upper.quaternion.copy(ikN.copy(upper.quaternion)).copy(ikU0).slerp(ikN, weight);
+      ikN.copy(lower.quaternion);
+      lower.quaternion.copy(ikL0).slerp(ikN, weight);
+    }
+    upper.updateWorldMatrix(false, true);
+  }
+  function flatFoot(name, weight) {                             // the sole level, toes the way he faces
+    if (weight <= 0.001) return;
+    const foot = bones[name];
+    foot.parent.updateWorldMatrix(true, false);
+    foot.parent.getWorldQuaternion(ikP);
+    foot.quaternion.slerp(ikQ.copy(ikP).invert().multiply(root.quaternion).multiply(bind.world[name]), weight);
+    foot.updateWorldMatrix(false, true);
+  }
+  // a hand laid flat: palm down, fingers pointing `way`. (Worked out from how the hand lies at rest:
+  // which way its fingers point and which way its palm faces then.)
+  const handRest = {};
+  for (const side of ['Left', 'Right']) {
+    const fingers = bind.rest[`${side}Fingers1`].clone().sub(bind.rest[`${side}Hand`]).normalize();
+    const thumb = new THREE.Vector3(0, 0, 1).addScaledVector(fingers, -fingers.z).normalize();          // at rest the thumbs point forward
+    const palm = side === 'Left' ? fingers.clone().cross(thumb) : thumb.clone().cross(fingers);
+    handRest[`${side}Hand`] = new THREE.Matrix4().makeBasis(fingers, palm, fingers.clone().cross(palm));
+  }
+  const handM = new THREE.Matrix4(), handX = new THREE.Vector3(), DOWN = new THREE.Vector3(0, -1, 0);
+  function flatHand(name, way, weight) {
+    if (weight <= 0.001) return;
+    const hand = bones[name];
+    hand.parent.updateWorldMatrix(true, false);
+    hand.parent.getWorldQuaternion(ikP);
+    handM.makeBasis(way, DOWN, handX.copy(way).cross(DOWN)).multiply(ikM.copy(handRest[name]).transpose());   // turns the hand as it lay at rest into flat
+    hand.quaternion.slerp(ikQ.copy(ikP).invert().multiply(ikN.setFromRotationMatrix(handM)).multiply(bind.world[name]), weight);
+    hand.updateWorldMatrix(false, true);
+  }
+  const ikM = new THREE.Matrix4();
+  const arc = (a, c, b, s, out) => out.set(0, 0, 0).addScaledVector(a, (1 - s) * (1 - s)).addScaledVector(c, 2 * s * (1 - s)).addScaledVector(b, s * s);   // from a to b, bowed toward c
+
   // ------------------------------------------------------------ climbing and stepping off
-  // The low ledge is a step up and the high one a pull-up. While he climbs, the poses say how his
-  // body looks and a few "pins" say where it is: a foot or both hands are held on a place on the ledge,
-  // and the whole body is moved so that they are. (The pins are worked out from where the body would
-  // be without them, every frame, so nothing builds up.)
+  // The low ledge is a step up; the high one, chest-high, is hands on the edge, a jump and press up
+  // on straight arms, then a foot brought up over the edge. The poses say how his body looks. Where
+  // it is comes from what is planted: the body is moved so that a planted foot (or his hands) is on
+  // its place, and each foot or hand that is planted or on its way is bent to its place exactly, on
+  // a path that goes up and over the ledge's edge, never through it. Then, whatever the poses do, no
+  // part of his legs or trunk is let into the ledge's face: the body is held back from it, and his
+  // hands and feet stay where they were put. (Release 10 only moved the body, and his knees went into the block.)
   let climb = null, dropGrace = 0;
-  const ballOf = (name) => bones[name].getWorldPosition(new THREE.Vector3());
-  const ballRest = (toeRestOf.LeftToeBase.y + toeRestOf.RightToeBase.y) / 2;   // how high the ball of a foot is above the floor it stands on
+  const at = (name) => bones[name].getWorldPosition(new THREE.Vector3());
+  const limbOf = { LeftFoot: ['LeftUpLeg', 'LeftLeg'], RightFoot: ['RightUpLeg', 'RightLeg'], LeftHand: ['LeftArm', 'LeftForeArm'], RightHand: ['RightArm', 'RightForeArm'] };
   function startClimb(hit) {
     const b = hit.box;
-    const into = Math.abs(hit.nx) > Math.abs(hit.nz) ? { x: Math.sign(hit.nx), z: 0 } : { x: 0, z: Math.sign(hit.nz) };
+    const into = Math.abs(hit.nx) > Math.abs(hit.nz) ? new THREE.Vector3(Math.sign(hit.nx), 0, 0) : new THREE.Vector3(0, 0, Math.sign(hit.nz));
     const along = into.x ? root.position.z : root.position.x, lo = into.x ? b.minZ : b.minX, hi = into.x ? b.maxZ : b.maxX;
-    if (along < lo + 0.12 || along > hi - 0.12) return false;     // at a corner: not a place to climb
+    if (along < lo + 0.3 || along > hi - 0.3) return false;      // too near a corner: no room for both feet
     const dist = into.x > 0 ? b.minX - root.position.x : into.x < 0 ? root.position.x - b.maxX : into.z > 0 ? b.minZ - root.position.z : root.position.z - b.maxZ;
     const kind = b.top - root.position.y <= 0.75 ? 'low' : 'high';
     root.updateMatrixWorld(true);
-    const left = ballOf('LeftToeBase'), right = ballOf('RightToeBase');
+    const start = { LeftFoot: at('LeftFoot'), RightFoot: at('RightFoot'), LeftHand: at('LeftHand'), RightHand: at('RightHand') };
     holdPose();
     mode = 'climb';
-    climb = { kind, box: b, into, dist, t0: now, base: root.position.clone(), y0: root.position.y, top: b.top, yaw0: loco.yaw, yaw1: Math.atan2(into.x, into.z), left, right };
+    const c = climb = { kind, box: b, into, left: new THREE.Vector3(into.z, 0, -into.x), dist, t0: now, base: root.position.clone(), y0: root.position.y, top: b.top,
+      yaw0: loco.yaw, yaw1: Math.atan2(into.x, into.z), start, push: 0, mark: {} };
+    c.depth = (p) => (p.x - c.base.x) * into.x + (p.z - c.base.z) * into.z - dist;      // how far past the ledge's face a place is (negative: this side of it)
+    c.place = (depth, y, like) => like.clone().addScaledVector(into, depth - c.depth(like)).setY(y);   // a place that deep and that high, level with `like` along the ledge
     if (kind === 'low') {
       // the higher foot goes up first; the lower one is the one he pushes from
-      const liftLeft = left.y >= right.y - 0.01, suffix = liftLeft ? '' : '_r';
-      Object.assign(climb, { lift: liftLeft ? 'LeftToeBase' : 'RightToeBase', plant: liftLeft ? 'RightToeBase' : 'LeftToeBase', plantAt: liftLeft ? right : left, tA: 0.32, liftAt: null });
-      line.plan(now, [[0.26, `up_low_a${suffix}`], [0.06, `up_low_a${suffix}`], [0.26, `up_low_b${suffix}`], [0.30, 'stand']]);
+      const first = start.LeftFoot.y >= start.RightFoot.y - 0.01 ? 'Left' : 'Right';
+      c.lift = `${first}Foot`; c.trail = first === 'Left' ? 'RightFoot' : 'LeftFoot';
+      c.on = c.place(0.17, c.top + ankleRest, start[c.lift]);    // where the first foot comes down on the ledge
+      line.plan(now, [[0.34, `up_low_a${first === 'Left' ? '' : '_r'}`], [0.08, `up_low_a${first === 'Left' ? '' : '_r'}`], [0.30, `up_low_b${first === 'Left' ? '' : '_r'}`], [0.34, 'stand']]);
     } else {
-      Object.assign(climb, { tReach: 0.24, tPress: 1.06 });
-      line.plan(now, [[0.10, 'reach'], [0.14, 'charge_full'], [0.26, 'mantle_reach'], [0.28, 'mantle_pull'], [0.28, 'mantle_press'], [0.32, 'land_squat'], [0.24, 'land_rise'], [0.26, 'stand']]);
+      c.lift = 'LeftFoot'; c.trail = 'RightFoot';
+      const mid = root.position;
+      // his left foot comes up on to the ledge out to the left of his left hand (as far as the ledge goes that way)
+      const room = c.left.x ? (c.left.x > 0 ? b.maxX - mid.x : mid.x - b.minX) : (c.left.z > 0 ? b.maxZ - mid.z : mid.z - b.minZ);
+      c.wide = Math.min(0.40, room - 0.12);
+      c.on = c.place(0.20, c.top + ankleRest, mid).addScaledVector(c.left, c.wide);
+      c.hands = { LeftHand: c.place(0.05, c.top + 0.045, mid).addScaledVector(c.left, 0.17), RightHand: c.place(0.05, c.top + 0.045, mid).addScaledVector(c.left, -0.17) };
+      line.plan(now, [[0.18, 'climb_dip'], [0.08, 'climb_dip'], [0.26, 'mantle_press'], [0.08, 'mantle_press'], [0.34, 'land_squat'], [0.10, 'land_squat'], [0.26, 'land_rise'], [0.28, 'stand']]);
     }
     return true;
   }
-  const mid = new THREE.Vector3();
-  function placeClimb() {
+  const pinA = new THREE.Vector3(), pinB = new THREE.Vector3(), goal = new THREE.Vector3(), over = new THREE.Vector3(), kneeWay = new THREE.Vector3(), elbowWay = new THREE.Vector3();
+  // where each planted or travelling foot and hand should be at this moment: [bone, place, how much, how flat (feet)]
+  function climbGoals(c, t) {
+    const goals = [], mark = c.mark;
+    const swingOver = (name, from, to, s, high, wide = 0) => {   // from `from` up and over the ledge's edge to `to` (out to his left by `wide` on the way)
+      over.copy(c.place(Math.min(c.depth(from), -0.22) - 0.08, c.top + high, from)).addScaledVector(c.left, wide);
+      return arc(from, over, to, ramp(s), new THREE.Vector3());
+    };
+    if (c.kind === 'low') {
+      goals.push([c.lift, t < 0.42 ? swingOver(c.lift, c.start[c.lift], c.on, t / 0.42, 0.34) : c.on, ramp(t / 0.10), ramp((t - 0.20) / 0.16)]);
+      if (t < 0.44) goals.push([c.trail, c.start[c.trail], 1, 1 - ramp((t - 0.36) / 0.08)]);
+      else if (t < 0.86) goals.push([c.trail, swingOver(c.trail, c.start[c.trail], at(c.trail), (t - 0.44) / 0.40, 0.5), 1 - ramp((t - 0.72) / 0.14), 0]);
+    } else {
+      // his hands come up and over the edge on to it (not through it), and stay there until he is squatting on top
+      const hold = ramp(t / 0.24) * (1 - ramp((t - 0.90) / 0.16));
+      for (const name of ['LeftHand', 'RightHand']) {
+        over.copy(c.place(Math.min(c.depth(c.start[name]), -0.12) - 0.12, c.top + 0.46, c.hands[name]));
+        goals.push([name, t < 0.30 ? arc(c.start[name], over, c.hands[name], ramp(t / 0.30), new THREE.Vector3()) : c.hands[name], hold, ramp(t / 0.16)]);
+      }
+      t -= 0.04;                                                  // (the times below were set when the dip was that much shorter)
+      for (const name of ['LeftFoot', 'RightFoot']) if (t < 0.27) goals.push([name, c.start[name], 1 - ramp((t - 0.22) / 0.05), 1]);   // feet on the floor until the jump
+      if (t >= 0.52) {
+        mark.lift ||= at(c.lift);
+        goals.push([c.lift, t < 0.88 ? swingOver(c.lift, mark.lift, c.on, (t - 0.52) / 0.36, 0.30, c.wide + 0.2) : c.on, ramp((t - 0.52) / 0.14), ramp((t - 0.70) / 0.14)]);
+      }
+      if (t >= 0.60 && t < 1.20) {
+        // the other foot stays hanging where it is, outside the edge, while his body goes in over the ledge; then it follows, over the edge
+        mark.trail ||= at(c.trail);
+        goals.push([c.trail, t < 0.82 ? mark.trail : swingOver(c.trail, mark.trail, at(c.trail), (t - 0.82) / 0.38, 0.5), ramp((t - 0.60) / 0.12) * (1 - ramp((t - 1.08) / 0.12)), 0]);
+      }
+    }
+    return goals;
+  }
+  function bendTo(c, goals) {
+    for (const [name, place, weight, flat] of goals) {
+      const [upper, lower] = limbOf[name];
+      if (/Foot/.test(name)) {
+        // which way the knee goes: forward when the foot is below the hip, up when it is out in front
+        // (a knee asked to point along the leg's own reach flips from side to side)
+        bones[upper].getWorldPosition(ikH);
+        ikT.copy(place).sub(ikH).normalize();
+        kneeWay.copy(c.into).multiplyScalar(Math.max(0, -ikT.y)).addScaledVector(UP, Math.max(0, ikT.dot(c.into)) + Math.abs(ikT.dot(c.left))).addScaledVector(c.left, name === 'LeftFoot' ? 0.06 : -0.06);
+      }
+      if (/Hand/.test(name)) elbowWay.copy(c.into).multiplyScalar(-1).addScaledVector(c.left, name === 'LeftHand' ? 0.5 : -0.5).setY(-0.2);
+      reach(bones[upper], bones[lower], bones[name], place, /Hand/.test(name) ? elbowWay : kneeWay, weight);
+      if (/Hand/.test(name)) flatHand(name, c.into, flat * weight);
+      else if (flat) flatFoot(name, flat * weight);
+    }
+  }
+  function placeClimb(dt) {
     const c = climb, t = now - c.t0;
     root.quaternion.setFromAxisAngle(UP, c.yaw0 + wrap(c.yaw1 - c.yaw0) * ramp(t / 0.25));
-    root.updateMatrixWorld(true);
-    const liftNow = c.kind === 'low' ? ballOf(c.lift) : null;   // (where the lifted foot is, with the body where it was last frame)
-    const pins = [];                                             // [where that part of him is with the body unpinned, where it must be, how much]
     root.position.copy(c.base);
     root.updateMatrixWorld(true);
+    // the body goes where what is planted puts it (each worked out from where the body would be without it)
     if (c.kind === 'low') {
-      const w = ramp((t - c.tA) / 0.10);
-      const plantTo = new THREE.Vector3(c.plantAt.x, c.y0 + ballRest, c.plantAt.z);
-      plantTo.y = c.plantAt.y + (plantTo.y - c.plantAt.y) * ramp(t / 0.12);
-      if (!c.liftAt && t >= c.tA) c.liftAt = liftNow;
-      pins.push([ballOf(c.plant), plantTo, 1 - w]);
-      if (c.liftAt) {
-        const to = c.liftAt.clone();
-        to.y = c.liftAt.y + (c.top + ballRest - c.liftAt.y) * ramp((t - c.tA) / 0.2);
-        pins.push([ballOf(c.lift), to, w]);
-      }
+      const shift = ramp((t - 0.34) / 0.32);                      // his weight goes from the foot on the floor to the foot on the ledge
+      pinA.copy(c.start[c.trail]).sub(at(c.trail)).multiplyScalar(1 - shift);
+      pinA.addScaledVector(c.into, clamp(c.dist - 0.42, 0, 0.28) * ramp(t / 0.3) * (1 - shift));   // (from a long step away he leans in over the planted foot first)
+      pinB.copy(c.on).sub(at(c.lift)).multiplyScalar(shift);
+      root.position.add(pinA).add(pinB);
     } else {
-      const reach = ramp((t - c.tReach) / 0.26), feet = ramp((t - c.tPress) / 0.32);
-      const edge = (inside, y) => new THREE.Vector3(c.base.x + c.into.x * (c.dist + inside), y, c.base.z + c.into.z * (c.dist + inside));
-      pins.push([mid.copy(ballOf('LeftHand')).add(ballOf('RightHand')).multiplyScalar(0.5).clone(), edge(0.03, c.top + 0.05), reach * (1 - feet)]);
-      pins.push([ballOf('LeftToeBase').add(ballOf('RightToeBase')).multiplyScalar(0.5), edge(0.55, c.top + ballRest), feet]);
+      const onHands = ramp((t - 0.26) / 0.10), onFootNow = ramp((t - 0.68) / 0.26);
+      pinA.copy(c.hands.LeftHand).add(c.hands.RightHand).sub(at('LeftHand')).sub(at('RightHand')).multiplyScalar(0.5 * onHands * (1 - onFootNow));
+      pinB.copy(c.on).sub(at(c.lift)).multiplyScalar(onFootNow);
+      root.position.add(pinA).add(pinB);
+      if (t < 0.24) root.position.y = Math.max(root.position.y, c.y0);
     }
-    for (const [at, to, w] of pins) if (w > 1e-4) root.position.addScaledVector(tmpV.copy(to).sub(at), w);
+    root.position.addScaledVector(c.into, -c.push);
+    root.updateMatrixWorld(true);
+    const goals = climbGoals(c, t);
+    bendTo(c, goals);
+    // nothing of his legs or trunk inside the ledge's face: he is held back from it, at once; he comes back in no faster than a walk
+    for (let pass = 0; pass < 2; pass++) {
+      let least = Infinity;
+      for (const p of SKIN) {
+        if (p.hand || p.foot) continue;                          // (his hands rest on it; his feet are put where they go)
+        p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld);
+        if (skinV.y < c.top - 0.02) least = Math.min(least, -c.depth(skinV));
+      }
+      const gap = least - 0.012, push = Math.max(0, c.push - (pass ? Math.min(gap, 0) : Math.min(gap, 1.2 * dt)));
+      if (Math.abs(push - c.push) < 1e-5) break;
+      root.position.addScaledVector(c.into, c.push - push);
+      c.push = push;
+      root.updateMatrixWorld(true);
+      bendTo(c, goals);
+    }
     root.updateMatrixWorld(true);
   }
   function endClimb() {
     root.position.y = climb.top;
+    loco.yaw = climb.yaw1;                                       // he stays facing the way he climbed
     climb = null; mode = 'ground';
     loco.speed = 0; loco.blend = 0;
     root.updateMatrixWorld(true);
@@ -815,7 +1028,8 @@ async function main() {
     balance(com);
     turn = -leanNow();
     plainLean = 4;
-    vel.set(Math.sin(loco.yaw), 0, Math.cos(loco.yaw)).multiplyScalar(Math.max(carry * 0.7, 1.2));   // (a slow walker is still carried clear of the edge)
+    vel.set(Math.sin(loco.yaw), 0, Math.cos(loco.yaw)).multiplyScalar(Math.max(carry * 0.7, 1.4));   // (a slow walker is still carried clear of the edge)
+    vel.y = 0.9;                                                 // a small hop off it, so the foot behind him clears the edge too
     dropGrace = now + 0.12;                                      // for a moment the platform he is leaving is not the floor he lands on
     line.plan(now, [[0.22, 'land_rise']]);
   }
@@ -901,11 +1115,13 @@ async function main() {
     return Math.atan2(tmpV.z, tmpV.y) / DEG;
   }
   const FEET = SKIN.filter((p) => p.foot);
+  const contact = { floor: 0, x: 0, z: 0 };                      // what the lowest part of his feet is over: how high that floor is, and where
   function feetLow() {                                           // how high the lowest part of either foot is: the sock itself, not its bones
     let low = Infinity;
     for (const p of FEET) {
       p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld);
-      low = Math.min(low, skinV.y - floorUnder(skinV));
+      const floor = floorUnder(skinV);
+      if (skinV.y - floor < low) { low = skinV.y - floor; contact.floor = floor; contact.x = skinV.x; contact.z = skinV.z; }
     }
     return low;
   }
@@ -1084,11 +1300,14 @@ async function main() {
   }
 
   // He cannot end up inside a platform he came down beside: he is slid out of it, the short way.
-  function clearOfPlatforms(dt) {
-    for (const b of BOXES) {
-      if (root.position.y > b.top - 0.25) continue;              // he is on top of this one
-      hips.getWorldPosition(tmpV);
-      const ways = [[tmpV.x - b.minX, -1, 0], [b.maxX - tmpV.x, 1, 0], [tmpV.z - b.minZ, 0, -1], [b.maxZ - tmpV.z, 0, 1]];
+  function clearOfPlatforms(dt, rate = 6) {
+    hips.getWorldPosition(tmpV);
+    const hx = tmpV.x, hz = tmpV.z;
+    for (const b of ALL_BLOCKS) {
+      if (hx < b.minX - 1.5 || hx > b.maxX + 1.5 || hz < b.minZ - 1.5 || hz > b.maxZ + 1.5) continue;     // nowhere near it
+      // he is on top of this one (his weight over it, his feet at its height): nothing to clear
+      if (root.position.y > b.top - 0.25 && weight.x > b.minX && weight.x < b.maxX && weight.z > b.minZ && weight.z < b.maxZ) continue;
+      const ways = [[hx - b.minX, -1, 0], [b.maxX - hx, 1, 0], [hz - b.minZ, 0, -1], [b.maxZ - hz, 0, 1]];
       const [, wx, wz] = ways.reduce((best, way) => (way[0] < best[0] ? way : best));
       let need = 0;
       for (const p of SKIN) {
@@ -1097,7 +1316,7 @@ async function main() {
         need = Math.max(need, wx < 0 ? skinV.x - b.minX : wx > 0 ? b.maxX - skinV.x : wz < 0 ? skinV.z - b.minZ : b.maxZ - skinV.z);
       }
       if (need > 0) {
-        const go = Math.min(need + 0.01, 3.5 * dt);
+        const go = Math.min(need + 0.01, rate * dt);
         root.position.x += wx * go; root.position.z += wz * go;
         toesAt.x += wx * go; toesAt.z += wz * go;                // (his feet go with him: they are not pinned inside the block)
         pin.at.x += wx * go; pin.at.z += wz * go;
@@ -1146,6 +1365,17 @@ async function main() {
       tmpV.copy(toeRest).applyQuaternion(root.quaternion);
       root.position.set(toes.x - tmpV.x, floorUnder(toes), toes.z - tmpV.z);
       toesAt.copy(toes);
+      if (feetFirst && !handsFirst && contact.floor > 0.01) {
+        // His feet came down on a platform. Then that is where he stands, all of him: with his toes on
+        // its very edge the middle of his feet was just off it, the roof below was taken for his floor,
+        // and he dropped to it in one frame. He is stood on the platform, a foot's breadth in from its edge.
+        const b = BOXES.find((box) => Math.abs(box.top - contact.floor) < 1e-6 && contact.x > box.minX - 0.02 && contact.x < box.maxX + 0.02 && contact.z > box.minZ - 0.02 && contact.z < box.maxZ + 0.02);
+        if (b) {
+          const x = clamp(root.position.x, b.minX + 0.08, b.maxX - 0.08), z = clamp(root.position.z, b.minZ + 0.08, b.maxZ - 0.08);
+          toesAt.x += x - root.position.x; toesAt.z += z - root.position.z;
+          root.position.set(x, b.top, z);
+        }
+      }
     } else {
       // he lies where he came down, carried on a hand's breadth by what speed he had
       root.position.set(0, 0, 0); root.updateMatrixWorld(true);
@@ -1264,7 +1494,7 @@ async function main() {
     // where his weight is: over his balance point in the air, over his hips in a fall, over his feet otherwise
     if (mode === 'air') weight.copy(com); else if (mode === 'fall') hips.getWorldPosition(weight); else weight.copy(root.position);
     const sinceLanding = now - touchdownAt;
-    const trail = mode === 'air' ? 0 : ramp(sinceLanding / 0.28) * (mode === 'ground' && sinceLanding >= 2 ? 0 : 1);
+    const trail = mode === 'air' ? 0 : ramp(sinceLanding / 0.28) * ((mode === 'ground' || mode === 'climb') && sinceLanding >= 2 ? 0 : 1);
     airBlend = clamp(airBlend + (mode === 'air' ? dt : -dt) / 0.08, 0, 1);    // what only happens in the air comes and goes over a moment
     const inAir = airBlend;
     pose(inAir, trail);
@@ -1354,6 +1584,30 @@ async function main() {
         line.plan(now, [[Math.max(toFloor, 0.04), brace]]);
       }
       root.updateMatrixWorld(true);
+      // A block's side is solid in the air too. (Now that he can walk anywhere, he can flip with a ledge
+      // close behind him: he went into it and came out of its side.) Whatever part of him is inside a
+      // block, well below its top, is put back out the way he came, and he loses his speed that way.
+      for (const b of ALL_BLOCKS) {
+        if (com.x < b.minX - 1.6 || com.x > b.maxX + 1.6 || com.z < b.minZ - 1.6 || com.z > b.maxZ + 1.6) continue;
+        // (over the block, he is coming down on it or leaving it: its top is a floor, which the landing sees to)
+        const overIt = com.x > b.minX && com.x < b.maxX && com.z > b.minZ && com.z < b.maxZ;
+        const ways = [[com.x - b.minX, -1, 0], [b.maxX - com.x, 1, 0], [com.z - b.minZ, 0, -1], [b.maxZ - com.z, 0, 1]];
+        const [, wx, wz] = ways.reduce((best, way) => (way[0] < best[0] ? way : best));
+        let need = 0;
+        for (const p of SKIN) {
+          p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld);
+          if (skinV.y > b.top - (overIt ? 0.25 : 0.03) || skinV.x <= b.minX || skinV.x >= b.maxX || skinV.z <= b.minZ || skinV.z >= b.maxZ) continue;
+          need = Math.max(need, wx < 0 ? skinV.x - b.minX : wx > 0 ? b.maxX - skinV.x : wz < 0 ? skinV.z - b.minZ : b.maxZ - skinV.z);
+        }
+        if (need > 0) {
+          const go = Math.min(need + 0.005, 9 * dt);
+          com.x += wx * go; com.z += wz * go;
+          hips.position.add(tmpV.set(wx * go, 0, wz * go).applyQuaternion(tmpQ2.copy(root.quaternion).multiply(hipsParentQ).invert()));
+          const inward = -(vel.x * wx + vel.z * wz);
+          if (inward > 0) { vel.x += wx * inward; vel.z += wz * inward; }
+          root.updateMatrixWorld(true);
+        }
+      }
       if (vel.y < 0 && now >= dropGrace) {
         // Coming down a little short, chest toward the floor, his hands reach it a moment before his
         // feet. That is a stumble on to the hands, not a fall, so while his feet are nearly down the
@@ -1395,17 +1649,18 @@ async function main() {
       }
       // keep the lower foot exactly on the floor while the poses blend
       root.updateMatrixWorld(true);
-      if (mode !== 'ground' && mode !== 'climb') { clearOfPlatforms(dt); root.updateMatrixWorld(true); }
+      // no part of him inside a block: on landing and in a fall, and standing too (a crouch beside a wall put his head and hands in it)
+      if (mode !== 'climb') { clearOfPlatforms(dt, mode === 'ground' ? 2.5 : 6); root.updateMatrixWorld(true); }
       if (mode === 'climb') {
-        placeClimb();                                            // (a climb is held by its pins, not by the floor)
+        placeClimb(dt);                                          // (a climb is held by what is planted, not by the floor)
       } else if (mode === 'fall') {
         // in a fall, whatever part of him is lowest rests on the floor; over nothing, he drops to it
         const low = bodyLow(true);
         if (low > 0.004) { drop += G * dt; root.position.y -= Math.min(low, drop * dt); }
-        else { drop = 0; root.position.y -= Math.max(low, -4.0 * dt); }   // pressed into the floor, he comes out of it over a frame or two: no jump
+        else { drop = 0; root.position.y -= Math.max(low, -7.0 * dt); }   // pressed into the floor, he comes out of it over a frame or two: no jump
       } else {
         let low = feetLow();
-        if (mode === 'landing') low = Math.min(low, bodyLow(false));   // and no other part of him goes into the floor either (hands that came down first hold him up until his feet arrive)
+        if (mode === 'landing' || loco.blend > 0.002) low = Math.min(low, bodyLow(false));   // and no other part of him goes into the floor either (hands that came down first hold him up until his feet arrive; a trouser cuff when a heel kicks up)
         if (Math.abs(low) > 0.002) hips.position.add(tmpV.set(0, -low, 0).applyQuaternion(tmpQ2.copy(root.quaternion).multiply(hipsParentQ).invert()));
       }
     }
@@ -1443,6 +1698,24 @@ async function main() {
     controls.update();
     sun.target.position.copy(follow);
     sun.position.set(follow.x - 7, follow.y + 4.6, follow.z + 4);
+    // A block between the camera and him would hide him. It turns to glass while it is in the way, so
+    // he is always in view and the camera never has to jump. (Bringing the camera in instead gave a
+    // close-up of his arm whenever he stood by a wall.)
+    {
+      const dx = camera.position.x - follow.x, dy = camera.position.y - follow.y, dz = camera.position.z - follow.z;
+      for (const b of ALL_BLOCKS) {
+        let enter = 0, leave = 1;
+        for (const [o, d, lo, hi] of [[follow.x, dx, b.minX - 0.1, b.maxX + 0.1], [follow.y, dy, -1, b.top + 0.1], [follow.z, dz, b.minZ - 0.1, b.maxZ + 0.1]]) {
+          if (Math.abs(d) < 1e-9) { if (o <= lo || o >= hi) { enter = 2; break; } continue; }
+          const t1 = (lo - o) / d, t2 = (hi - o) / d;
+          enter = Math.max(enter, Math.min(t1, t2)); leave = Math.min(leave, Math.max(t1, t2));
+        }
+        b.seen += ((enter < leave ? 0.22 : 1) - b.seen) * (1 - Math.exp(-dt / 0.14));
+        const glass = b.seen < 0.985;
+        if (b.mesh.material.transparent !== glass) { b.mesh.material.transparent = glass; b.mesh.material.depthWrite = !glass; b.mesh.material.needsUpdate = true; }
+        b.mesh.material.opacity = glass ? b.seen : 1;
+      }
+    }
     renderer.render(scene, camera);
   }
 
@@ -1456,7 +1729,10 @@ async function main() {
   renderer.setAnimationLoop(frame);
   $('cover').classList.add('gone');
   window.__game = { get mode() { return mode; }, get turn() { return turn; }, get slide() { return cloth.slide; }, get height() { return hips.getWorldPosition(new THREE.Vector3()).y; }, get low() { return feetLow(); }, get lean() { return leanNow(); }, get fall() { return lastFall; }, get samples() { return SKIN.length; }, get at() { return root.position.toArray().map((v) => +v.toFixed(2)); }, bodyLow, landHeight, set lift(v) { aimLift = v; }, set pose(name) { line.plan(now, [[0.3, name], [1000, name]]); }, get state() { return { tucked, stalled, hang, planned, landing, grade, held: { ...held }, now: +now.toFixed(3) }; }, lowest: () => { let best = null; for (const p of SKIN) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); const h = skinV.y - floorUnder(skinV); if (!best || h < best[0]) best = [+h.toFixed(3), p.name]; } return best; },
-    step: (dt = 1 / 60) => frame(0, null, dt), press, release, poses, line, bones, loco, pad, arrows, walkLoop, jogLoop, STEP, move: (v) => { pad.x = v[0]; pad.y = v[1]; }, put: ([x, z]) => { root.position.set(x, groundAt(x, z), z); loco.yaw = 0; loco.speed = 0; loco.blend = 0; root.quaternion.identity(); cloth.reset(); }, walk: ([yaw, mag]) => { aimYaw = yaw === null ? null : yaw * DEG; pad.x = 0; pad.y = mag; }, contact: () => { let best = null; for (const p of FEET) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); if (!best || skinV.y < best.y) best = { x: skinV.x, y: skinV.y, z: skinV.z, name: p.name }; } return best; }, get yaw() { return loco.yaw; }, get climbing() { return !!climb; }, camera, controls, root, scene, cloth };
+    step: (dt = 1 / 60) => frame(0, null, dt), press, release, poses, line, bones, loco, pad, arrows, walkLoop, jogLoop, STEP, move: (v) => { pad.x = v[0]; pad.y = v[1]; }, put: ([x, z]) => { root.position.set(x, groundAt(x, z), z); loco.yaw = 0; loco.speed = 0; loco.blend = 0; root.quaternion.identity(); cloth.reset(); }, walk: ([yaw, mag]) => { aimYaw = yaw === null ? null : yaw * DEG; pad.x = 0; pad.y = mag; }, contact: () => { let best = null; for (const p of FEET) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); if (!best || skinV.y < best.y) best = { x: skinV.x, y: skinV.y, z: skinV.z, name: p.name }; } return best; }, get yaw() { return loco.yaw; }, get climbing() { return !!climb; },
+    // how deep the deepest part of him is inside a block or the roof, which part, and what it is in
+    inside: () => { let worst = [0, '', '']; root.updateMatrixWorld(true); for (const p of SKIN) { p.mesh.getVertexPosition(p.i, skinV).applyMatrix4(p.mesh.matrixWorld); if (-skinV.y > worst[0]) worst = [-skinV.y, p.name, 'roof']; for (const b of ALL_BLOCKS) { if (skinV.y >= b.top || skinV.x <= b.minX || skinV.x >= b.maxX || skinV.z <= b.minZ || skinV.z >= b.maxZ) continue; const d = Math.min(skinV.x - b.minX, b.maxX - skinV.x, skinV.z - b.minZ, b.maxZ - skinV.z, b.top - skinV.y); if (d > worst[0]) worst = [d, p.name, `block ${b.top}`]; } } return [+worst[0].toFixed(3), worst[1], worst[2]]; },
+    render: () => renderer.render(scene, camera), blocks: ALL_BLOCKS, camera, controls, root, scene, cloth };
 }
 
 main().catch((error) => {
